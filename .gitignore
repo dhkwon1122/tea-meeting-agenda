@@ -1,2 +1,10 @@
 __pycache__/
 *.pyc
+
+# 사내 CA 인증서(Dockerfile 빌드용) - 사내 자산이므로 커밋하지 않는다.
+certs/*.crt
+certs/*.pem
+
+# 로컬 메일 API 자격증명
+.env
+

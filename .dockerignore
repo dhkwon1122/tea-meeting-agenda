@@ -1,0 +1,13 @@
+# 빌드 컨텍스트에서 제외 (이미지에 굽지 않음)
+.git
+.gitignore
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+*.env
+!.env.example
+
+# certs/ 는 제외하지 않는다 (Dockerfile 이 사내 CA를 복사해야 함)
