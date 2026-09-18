@@ -183,3 +183,28 @@ def build_agenda_page_body(
         parts.append(attachment_section_html(idx, item.title))
 
     return "\n".join(p for p in parts if p)
+
+
+def build_email_subject(items: Sequence[AgendaItem]) -> str:
+    """메일 제목. 첫 안건 제목 + "외 N건"을 붙인다."""
+    if not items:
+        return "[안건 보고]"
+    suffix = f" 외 {len(items) - 1}건" if len(items) > 1 else ""
+    return f"[안건 보고] {items[0].title}{suffix}"
+
+
+def build_agenda_email_html(items: Sequence[AgendaItem], intro: Optional[TextInput] = None) -> str:
+    """Confluence storage-format의 ac:* 매크로는 일반 메일 클라이언트가 렌더링하지
+    못하므로, 메일 본문용으로 안건 제목만 깔끔한 순서 목록(HTML)으로 만든다.
+    """
+    if not items:
+        raise ValueError("최소 1개 이상의 안건이 필요합니다.")
+
+    parts: List[str] = ["<h2>안건 보고</h2>"]
+    if intro:
+        parts.append(_paragraphs_html(intro))
+
+    items_html = "\n".join(f"<li>{html.escape(item.title)}</li>" for item in items)
+    parts.append(f"<ol>\n{items_html}\n</ol>")
+
+    return "\n".join(parts)

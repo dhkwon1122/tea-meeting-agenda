@@ -1,7 +1,12 @@
 import re
 import unittest
 
-from confluence_agenda.builder import AgendaItem, build_agenda_page_body
+from confluence_agenda.builder import (
+    AgendaItem,
+    build_agenda_email_html,
+    build_agenda_page_body,
+    build_email_subject,
+)
 
 
 class BuildAgendaPageBodyTest(unittest.TestCase):
@@ -86,6 +91,38 @@ class BuildAgendaPageBodyTest(unittest.TestCase):
 
         self.assertIn("<p>첫 줄</p>", result)
         self.assertIn("<p>둘째 줄</p>", result)
+
+
+class BuildAgendaEmailHtmlTest(unittest.TestCase):
+    def test_requires_at_least_one_item(self):
+        with self.assertRaises(ValueError):
+            build_agenda_email_html([])
+
+    def test_lists_titles_as_ordered_list(self):
+        items = [AgendaItem(title="예산 승인"), AgendaItem(title="채용 계획")]
+        result = build_agenda_email_html(items)
+
+        self.assertIn("<ol>", result)
+        self.assertIn("<li>예산 승인</li>", result)
+        self.assertIn("<li>채용 계획</li>", result)
+        # ac:* Confluence 매크로는 메일 클라이언트가 렌더링 못하므로 섞이면 안 된다.
+        self.assertNotIn("ac:structured-macro", result)
+
+    def test_escapes_html_in_titles(self):
+        items = [AgendaItem(title="<script>alert(1)</script>")]
+        result = build_agenda_email_html(items)
+
+        self.assertNotIn("<script>alert(1)</script>", result)
+        self.assertIn("&lt;script&gt;", result)
+
+
+class BuildEmailSubjectTest(unittest.TestCase):
+    def test_single_item(self):
+        self.assertEqual(build_email_subject([AgendaItem(title="예산 승인")]), "[안건 보고] 예산 승인")
+
+    def test_multiple_items_add_count_suffix(self):
+        items = [AgendaItem(title="예산 승인"), AgendaItem(title="채용 계획")]
+        self.assertEqual(build_email_subject(items), "[안건 보고] 예산 승인 외 1건")
 
 
 if __name__ == "__main__":
