@@ -1,5 +1,9 @@
-"""사용자로부터 안건(대략 N개, 보통 10개 내외)을 입력받아
+"""사용자로부터 안건 제목(대략 N개, 보통 10개 내외)을 입력받아
 Confluence 에디터의 '마크업 삽입'에 그대로 붙여넣을 storage-format 소스를 출력한다.
+
+본문은 자리표시자 3줄로 자동 채워지고, 첨부 내용은 "(첨부 N) {안건 제목}" 이라는
+이름의 하위 페이지를 include 매크로로 자동 포함하므로 별도 입력이 필요 없다.
+(해당 하위 페이지는 미리 만들어져 있어야 한다.)
 
 사용 예:
     python -m confluence_agenda.cli              # 화면에 바로 출력
@@ -13,17 +17,6 @@ from typing import List, Optional
 from .builder import AgendaItem, build_agenda_page_body
 
 
-def _read_multiline(prompt: str) -> str:
-    print(f"{prompt} (입력 종료: 빈 줄에서 Enter)")
-    lines: List[str] = []
-    while True:
-        line = input()
-        if line == "":
-            break
-        lines.append(line)
-    return "\n".join(lines)
-
-
 def prompt_items() -> List[AgendaItem]:
     while True:
         raw = input("안건 개수(N)를 입력하세요: ").strip()
@@ -34,11 +27,8 @@ def prompt_items() -> List[AgendaItem]:
 
     items: List[AgendaItem] = []
     for i in range(1, n + 1):
-        print(f"\n--- 안건 {i} ---")
         title = input(f"안건 {i} 제목: ").strip()
-        body = _read_multiline(f"안건 {i} 본문")
-        attachment_body = _read_multiline(f"안건 {i} 첨부 내용(요약, 링크 설명 등)")
-        items.append(AgendaItem(title=title, body=body, attachment_body=attachment_body))
+        items.append(AgendaItem(title=title))
     return items
 
 

@@ -1,11 +1,10 @@
 from .builder import (
     AgendaItem,
-    build_agenda_page_body,
-    anchor_macro,
     anchor_link,
-    expand_macro,
-    attachment_image_macro,
-    attachment_link_macro,
+    anchor_macro,
+    attachment_section_html,
+    build_agenda_page_body,
+    heading_html,
 )
 
 __all__ = [
@@ -13,7 +12,6 @@ __all__ = [
     "build_agenda_page_body",
     "anchor_macro",
     "anchor_link",
-    "expand_macro",
-    "attachment_image_macro",
-    "attachment_link_macro",
+    "heading_html",
+    "attachment_section_html",
 ]

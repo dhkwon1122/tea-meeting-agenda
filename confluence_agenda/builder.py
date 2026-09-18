@@ -2,26 +2,27 @@
 
 생성되는 구조:
 
-    1. 안건1 (첨부1)   <- "(첨부1)"은 하단 Expand의 "첨부1" 앵커로 이동하는 링크
-                          (이 줄 자체에는 "제목1" 앵커가 심어져, 아래에서 되돌아올 수 있음)
-       본문...
+    1. 안건1 (첨부1)   <- "(첨부1)"은 "첨부1" 앵커(하단 ui-expand 앞)로 이동하는 링크
+                          (이 줄 자체에 "제목1" 앵커가 심어져, 아래에서 되돌아올 수 있음)
+       (본문 자리표시자 3줄)
     2. 안건2 (첨부2)
-       본문...
+       (본문 자리표시자 3줄)
     ...
 
-    ▽ Expand: (첨부1) 안건1
-        « 제목1로 돌아가기   <- 위 "제목1" 앵커로 되돌아가는 링크
-        (첨부 내용)
-    ▽ Expand: (첨부2) 안건2
-        « 제목2로 돌아가기
-        (첨부 내용)
-    ...
+    [anchor: 첨부1]
+    ▽ ui-expand: "(첨부 1) 안건1"
+        - include 매크로로 같은 제목의 하위 페이지("(첨부 1) 안건1")를 포함
+        - "제목1" 앵커로 돌아가는 "(돌아가기)" 링크
+    [anchor: 첨부2]
+    ▽ ui-expand: "(첨부 2) 안건2"
+        ...
 
 앵커 이름 규칙(팀 컨플루언스 매크로 소스 기준):
-    - 안건 제목 줄에 심는 앵커: "제목{N}"
-    - Expand 앞에 심는 앵커: "첨부{N}"
-    - 제목의 "(첨부N)" 링크는 "첨부{N}" 앵커로,
-      Expand 안의 되돌아가기 링크는 "제목{N}" 앵커로 이동한다.
+    - 안건 제목 줄에 심는 앵커: "제목{N}" (공백 없음)
+    - ui-expand 앞에 심는 앵커: "첨부{N}" (공백 없음)
+    - 제목의 "(첨부N)" 링크는 "첨부{N}" 앵커로 이동
+    - ui-expand 안의 "(돌아가기)" 링크는 "제목{N}" 앵커로 이동
+    - ui-expand의 제목 / 포함할 하위 페이지 제목은 "(첨부 N) {안건 제목}" (공백 있음)
 """
 from __future__ import annotations
 
@@ -32,6 +33,11 @@ from typing import List, Optional, Sequence, Union
 
 # 문자열 하나 또는 줄 단위 문자열 목록을 본문으로 받는다.
 TextInput = Union[str, Sequence[str]]
+
+# 본문을 비워두면 채워 넣는 자리표시자: 3칸 들여쓰기(&nbsp;) + 안내 문구, 3줄.
+_PLACEHOLDER_LINE_TEXT = "가나다라마바사 내용을 입력해주세요"
+_PLACEHOLDER_INDENT = "&nbsp;" * 3
+_PLACEHOLDER_LINE_COUNT = 3
 
 
 def _cdata_escape(text: str) -> str:
@@ -50,10 +56,18 @@ def _paragraphs_html(text: TextInput) -> str:
     )
 
 
-def _resolve_body_html(text: TextInput, raw: bool) -> str:
-    if raw:
-        return text if isinstance(text, str) else "\n".join(text)
-    return _paragraphs_html(text)
+def _default_body_html() -> str:
+    """본문을 채우지 않았을 때 들어가는 자리표시자 3줄."""
+    line = f"{_PLACEHOLDER_INDENT}{_PLACEHOLDER_LINE_TEXT}"
+    return "\n".join(f"<p>{line}</p>" for _ in range(_PLACEHOLDER_LINE_COUNT))
+
+
+def _resolve_body_html(item: "AgendaItem") -> str:
+    if not item.body:
+        return _default_body_html()
+    if item.raw_body:
+        return item.body if isinstance(item.body, str) else "\n".join(item.body)
+    return _paragraphs_html(item.body)
 
 
 def _new_macro_id() -> str:
@@ -79,32 +93,8 @@ def anchor_link(anchor_name: str, link_text: str) -> str:
     )
 
 
-def attachment_image_macro(filename: str, width: Optional[int] = None) -> str:
-    """페이지에 업로드된 첨부 이미지를 삽입하는 매크로."""
-    width_attr = f' ac:width="{width}"' if width else ""
-    return (
-        f"<ac:image{width_attr}>"
-        f'<ri:attachment ri:filename="{html.escape(filename)}"/>'
-        f"</ac:image>"
-    )
-
-
-def attachment_link_macro(filename: str, link_text: Optional[str] = None) -> str:
-    """페이지에 업로드된 첨부 파일로 연결되는 다운로드 링크."""
-    body = (
-        f"<ac:plain-text-link-body><![CDATA[{_cdata_escape(link_text)}]]></ac:plain-text-link-body>"
-        if link_text
-        else ""
-    )
-    return f'<ac:link><ri:attachment ri:filename="{html.escape(filename)}"/>{body}</ac:link>'
-
-
 def heading_html(index: int, title: str) -> str:
-    """안건 제목 줄. 팀에서 쓰는 h3/strong/span 스타일 + '(첨부N)' 링크 + '제목N' 앵커.
-
-    사용자가 제공한 소스의 구조를 그대로 따르되, 타이핑 과정에서 깨진 것으로 보이는
-    ``ac:name`` / ``</ac:link>`` 오탈자만 정규 문법으로 바로잡았다.
-    """
+    """안건 제목 줄. 팀에서 쓰는 h3/strong/span 스타일 + '(첨부N)' 링크 + '제목N' 앵커."""
     attachment_anchor = f"첨부{index}"
     title_anchor = f"제목{index}"
     return (
@@ -121,33 +111,53 @@ def heading_html(index: int, title: str) -> str:
     )
 
 
-def expand_macro(title: str, body_html: str) -> str:
-    """접고 펼 수 있는 Expand UI 매크로."""
+def _include_page_macro(page_title: str) -> str:
+    """같은 제목의 하위 페이지를 현재 위치에 포함시키는 include 매크로."""
     return (
-        f'<ac:structured-macro ac:name="expand" ac:schema-version="1" '
+        f'<ac:structured-macro ac:name="include" ac:schema-version="1" '
         f'ac:macro-id="{_new_macro_id()}">'
-        f'<ac:parameter ac:name="title">{html.escape(title)}</ac:parameter>'
-        f"<ac:rich-text-body>{body_html}</ac:rich-text-body>"
+        f'<ac:parameter ac:name="">'
+        f'<ac:link><ri:page ri:content-title="{html.escape(page_title)}"/></ac:link>'
+        f"</ac:parameter>"
         f"</ac:structured-macro>"
     )
+
+
+def attachment_section_html(index: int, title: str) -> str:
+    """'첨부N' 앵커 + ui-expand 매크로(하위 페이지 include + '(돌아가기)' 링크)."""
+    attachment_anchor = f"첨부{index}"
+    title_anchor = f"제목{index}"
+    expand_title = f"(첨부 {index}) {title}"
+
+    include_html = _include_page_macro(expand_title)
+    back_link_html = anchor_link(title_anchor, "(돌아가기)")
+
+    ui_expand_html = (
+        f'<ac:structured-macro ac:name="ui-expand" ac:schema-version="1" '
+        f'ac:macro-id="{_new_macro_id()}">'
+        f'<ac:parameter ac:name="title">{html.escape(expand_title)}</ac:parameter>'
+        f"<ac:rich-text-body>"
+        f"<p>{include_html}</p>"
+        f"<p>{back_link_html}</p>"
+        f"</ac:rich-text-body>"
+        f"</ac:structured-macro>"
+    )
+
+    return anchor_macro(attachment_anchor) + "\n" + ui_expand_html
 
 
 @dataclass
 class AgendaItem:
     """안건 하나를 표현한다.
 
-    body / attachment_body 는 문자열(줄바꿈으로 문단 구분) 또는 문자열 목록을 받으며,
-    기본적으로 HTML 이스케이프되어 <p> 문단으로 변환된다.
-    raw_body / raw_attachment_body 를 True로 주면 이미 만들어둔 storage-format
-    XHTML(예: attachment_image_macro 결과)을 그대로 삽입할 수 있다.
+    body 를 비워두면 3줄짜리 안내 자리표시자가 자동으로 채워진다(추후 Confluence에서
+    직접 채워 넣는 용도). body 를 직접 넘기면 줄바꿈 기준으로 <p> 문단이 되고
+    (raw_body=True 면 이미 만들어둔 storage-format XHTML을 그대로 삽입).
     """
 
     title: str
     body: TextInput = ""
-    attachment_body: TextInput = ""
     raw_body: bool = False
-    raw_attachment_body: bool = False
-    back_link_text: Optional[str] = None
 
 
 def build_agenda_page_body(
@@ -163,22 +173,13 @@ def build_agenda_page_body(
     if intro:
         parts.append(_paragraphs_html(intro))
 
-    # 1) 안건 목록 (각 제목 옆에 "(첨부N)" 링크 + "제목N" 앵커)
+    # 1) 안건 목록 (각 제목 옆에 "(첨부N)" 링크 + "제목N" 앵커, 본문 자리표시자)
     for idx, item in enumerate(items, start=1):
         parts.append(heading_html(idx, item.title))
-        parts.append(_resolve_body_html(item.body, item.raw_body))
+        parts.append(_resolve_body_html(item))
 
-    # 2) 첨부 Expand 목록 ("첨부N" 앵커 + 되돌아가기 링크("제목N") + 첨부 내용)
+    # 2) 첨부 ui-expand 목록 ("첨부N" 앵커 + 하위 페이지 include + "(돌아가기)" 링크)
     for idx, item in enumerate(items, start=1):
-        title_anchor = f"제목{idx}"
-        attachment_anchor = f"첨부{idx}"
-        expand_title = f"(첨부{idx}) {item.title}"
-
-        back_text = item.back_link_text or f"« {title_anchor}로 돌아가기"
-        back_link_html = f"<p>{anchor_link(title_anchor, back_text)}</p>"
-        attachment_html = _resolve_body_html(item.attachment_body, item.raw_attachment_body)
-
-        parts.append(anchor_macro(attachment_anchor))
-        parts.append(expand_macro(expand_title, back_link_html + attachment_html))
+        parts.append(attachment_section_html(idx, item.title))
 
     return "\n".join(p for p in parts if p)
