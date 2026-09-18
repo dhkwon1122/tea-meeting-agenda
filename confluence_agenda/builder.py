@@ -1,20 +1,27 @@
-"""Confluence 안건 보고 페이지의 storage-format 본문을 생성하는 코어 로직.
+"""Confluence 안건 보고 페이지의 storage-format 소스(복붙용)를 생성하는 코어 로직.
 
 생성되는 구조:
 
-    1. 안건1 (첨부 1)   <- "(첨부 1)"은 하단 Expand 앵커로 이동하는 링크
+    1. 안건1 (첨부1)   <- "(첨부1)"은 하단 Expand의 "첨부1" 앵커로 이동하는 링크
+                          (이 줄 자체에는 "제목1" 앵커가 심어져, 아래에서 되돌아올 수 있음)
        본문...
-    2. 안건2 (첨부 2)
+    2. 안건2 (첨부2)
        본문...
     ...
 
-    ▽ Expand: (첨부 1) 안건1
-        « 1. 안건1로 돌아가기   <- 위 제목1 앵커로 되돌아가는 링크
+    ▽ Expand: (첨부1) 안건1
+        « 제목1로 돌아가기   <- 위 "제목1" 앵커로 되돌아가는 링크
         (첨부 내용)
-    ▽ Expand: (첨부 2) 안건2
-        « 2. 안건2로 돌아가기
+    ▽ Expand: (첨부2) 안건2
+        « 제목2로 돌아가기
         (첨부 내용)
     ...
+
+앵커 이름 규칙(팀 컨플루언스 매크로 소스 기준):
+    - 안건 제목 줄에 심는 앵커: "제목{N}"
+    - Expand 앞에 심는 앵커: "첨부{N}"
+    - 제목의 "(첨부N)" 링크는 "첨부{N}" 앵커로,
+      Expand 안의 되돌아가기 링크는 "제목{N}" 앵커로 이동한다.
 """
 from __future__ import annotations
 
@@ -49,7 +56,7 @@ def _resolve_body_html(text: TextInput, raw: bool) -> str:
     return _paragraphs_html(text)
 
 
-def _new_local_id() -> str:
+def _new_macro_id() -> str:
     return str(uuid.uuid4())
 
 
@@ -57,7 +64,7 @@ def anchor_macro(name: str) -> str:
     """지정한 이름의 북마크(anchor)를 생성하는 매크로."""
     return (
         f'<ac:structured-macro ac:name="anchor" ac:schema-version="1" '
-        f'ac:local-id="{_new_local_id()}">'
+        f'ac:macro-id="{_new_macro_id()}">'
         f'<ac:parameter ac:name="">{html.escape(name)}</ac:parameter>'
         f"</ac:structured-macro>"
     )
@@ -92,11 +99,33 @@ def attachment_link_macro(filename: str, link_text: Optional[str] = None) -> str
     return f'<ac:link><ri:attachment ri:filename="{html.escape(filename)}"/>{body}</ac:link>'
 
 
+def heading_html(index: int, title: str) -> str:
+    """안건 제목 줄. 팀에서 쓰는 h3/strong/span 스타일 + '(첨부N)' 링크 + '제목N' 앵커.
+
+    사용자가 제공한 소스의 구조를 그대로 따르되, 타이핑 과정에서 깨진 것으로 보이는
+    ``ac:name`` / ``</ac:link>`` 오탈자만 정규 문법으로 바로잡았다.
+    """
+    attachment_anchor = f"첨부{index}"
+    title_anchor = f"제목{index}"
+    return (
+        '<h3 style="text-align: left;"><strong style="letter-spacing: -0.006em;">'
+        '<span style="color:var(--ds-background-accent-blue-bolder,#0c66e4);">'
+        f"{index}. {html.escape(title)} "
+        f'<ac:link ac:anchor="{attachment_anchor}">'
+        f"<ac:plain-text-link-body><![CDATA[({attachment_anchor})]]></ac:plain-text-link-body>"
+        f"</ac:link> "
+        f'<ac:structured-macro ac:name="anchor" ac:schema-version="1" ac:macro-id="{_new_macro_id()}">'
+        f'<ac:parameter ac:name="">{title_anchor}</ac:parameter>'
+        f"</ac:structured-macro>"
+        "</span></strong></h3>"
+    )
+
+
 def expand_macro(title: str, body_html: str) -> str:
     """접고 펼 수 있는 Expand UI 매크로."""
     return (
         f'<ac:structured-macro ac:name="expand" ac:schema-version="1" '
-        f'ac:local-id="{_new_local_id()}">'
+        f'ac:macro-id="{_new_macro_id()}">'
         f'<ac:parameter ac:name="title">{html.escape(title)}</ac:parameter>'
         f"<ac:rich-text-body>{body_html}</ac:rich-text-body>"
         f"</ac:structured-macro>"
@@ -116,7 +145,6 @@ class AgendaItem:
     title: str
     body: TextInput = ""
     attachment_body: TextInput = ""
-    attachment_label: Optional[str] = None
     raw_body: bool = False
     raw_attachment_body: bool = False
     back_link_text: Optional[str] = None
@@ -126,10 +154,7 @@ def build_agenda_page_body(
     items: Sequence[AgendaItem],
     intro: Optional[TextInput] = None,
 ) -> str:
-    """안건 목록을 받아 Confluence storage-format 페이지 본문 문자열을 만든다.
-
-    반환값은 Confluence REST API의 ``body.storage.value`` 에 그대로 사용할 수 있다.
-    """
+    """안건 목록을 받아 컨플루언스 에디터에 그대로 붙여넣을 storage-format 소스를 만든다."""
     if not items:
         raise ValueError("최소 1개 이상의 안건이 필요합니다.")
 
@@ -138,25 +163,19 @@ def build_agenda_page_body(
     if intro:
         parts.append(_paragraphs_html(intro))
 
-    # 1) 안건 목록 (각 제목 옆에 해당 첨부 Expand로 이동하는 링크)
+    # 1) 안건 목록 (각 제목 옆에 "(첨부N)" 링크 + "제목N" 앵커)
     for idx, item in enumerate(items, start=1):
-        agenda_anchor = f"agenda-{idx}"
-        attachment_anchor = f"attachment-{idx}"
-        attachment_label = item.attachment_label or f"(첨부 {idx})"
-
-        parts.append(anchor_macro(agenda_anchor))
-        heading_link = anchor_link(attachment_anchor, attachment_label)
-        parts.append(f"<h2>{idx}. {html.escape(item.title)} {heading_link}</h2>")
+        parts.append(heading_html(idx, item.title))
         parts.append(_resolve_body_html(item.body, item.raw_body))
 
-    # 2) 첨부 Expand 목록 (각 Expand 안에 제목으로 되돌아가는 링크 포함)
+    # 2) 첨부 Expand 목록 ("첨부N" 앵커 + 되돌아가기 링크("제목N") + 첨부 내용)
     for idx, item in enumerate(items, start=1):
-        agenda_anchor = f"agenda-{idx}"
-        attachment_anchor = f"attachment-{idx}"
-        expand_title = f"(첨부 {idx}) {item.title}"
+        title_anchor = f"제목{idx}"
+        attachment_anchor = f"첨부{idx}"
+        expand_title = f"(첨부{idx}) {item.title}"
 
-        back_text = item.back_link_text or f"« {idx}. {item.title}로 돌아가기"
-        back_link_html = f"<p>{anchor_link(agenda_anchor, back_text)}</p>"
+        back_text = item.back_link_text or f"« {title_anchor}로 돌아가기"
+        back_link_html = f"<p>{anchor_link(title_anchor, back_text)}</p>"
         attachment_html = _resolve_body_html(item.attachment_body, item.raw_attachment_body)
 
         parts.append(anchor_macro(attachment_anchor))
