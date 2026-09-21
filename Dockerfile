@@ -16,10 +16,14 @@
 #     --build-arg HTTP_PROXY= --build-arg HTTPS_PROXY= --build-arg NO_PROXY= \
 #     -t confluence-agenda:latest .
 #
-# ── 실행 예시 (대화형 CLI이므로 -it 필수) ──────────────────────────
-#   docker run --rm -it confluence-agenda:latest
-#   # 메일 발송까지 하려면 .env(.env.example 참고)를 --env-file 로 주입:
-#   docker run --rm -it --env-file .env confluence-agenda:latest
+# ── 실행 예시 1) 웹 UI (기본값, 포트 10001) ────────────────────────
+#   docker run --rm -p 10001:10001 confluence-agenda:latest
+#   # http://localhost:10001 접속. 메일 발송까지 하려면 .env(.env.example
+#   # 참고)를 --env-file 로 주입:
+#   docker run --rm -p 10001:10001 --env-file .env confluence-agenda:latest
+#
+# ── 실행 예시 2) 대화형 CLI (-it 필수, 안건을 하나씩 입력) ──────────
+#   docker run --rm -it confluence-agenda:latest python -m confluence_agenda.cli
 
 FROM python:3.11-slim
 
@@ -90,6 +94,10 @@ RUN groupadd --gid 10001 app \
     && chown -R app:app /app
 USER app
 
-# 대화형 CLI다 — 안건 개수/제목을 표준입력으로 받으므로 `docker run -it`로
-# 실행해야 한다(-it 없이 실행하면 input()에서 즉시 EOF로 죽는다).
-ENTRYPOINT ["python", "-m", "confluence_agenda.cli"]
+# 기본 실행은 웹 UI (포트는 PORT 환경변수로 바꿀 수 있음, 기본 10001).
+# 대화형 CLI로 띄우려면 실행 시 커맨드를 덮어쓴다:
+#   docker run --rm -it <image> python -m confluence_agenda.cli
+# (-it 없이 CLI를 실행하면 input()에서 즉시 EOF로 죽는다.)
+ENV PORT=10001
+EXPOSE 10001
+CMD ["python", "-m", "confluence_agenda.web"]

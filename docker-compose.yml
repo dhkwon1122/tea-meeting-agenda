@@ -1,28 +1,40 @@
 # 사내 workstation에서 편하게 빌드/실행하기 위한 compose 파일.
-# 대화형 CLI이므로 `up`이 아니라 `run`으로 띄운다.
 #
 #   docker compose build
-#   docker compose run --rm app
+#   docker compose up -d web        # 웹 UI: http://localhost:10001
+#   docker compose run --rm cli     # 대화형 CLI (안건을 하나씩 입력)
 #
 # 메일 발송(선택)은 .env(.env.example 참고)에 MAIL_API_* 값을 채우면 자동 반영된다.
+x-build: &build
+  context: .
+  # 셸 환경변수 영향을 받지 않도록 리터럴로 고정한다(로컬에 NO_PROXY 등이
+  # 설정돼 있어도 이 값이 그대로 쓰인다). 사외/공용 PyPI로 빌드하려면
+  # 아래 값을 직접 빈 문자열로 바꿔서 빌드할 것.
+  args:
+    PIP_INDEX_URL: http://repository.samsungds.net/repository/proxy-pypi-files.pythonhosted.org/simple
+    PIP_TRUSTED_HOST: repository.samsungds.net
+    HTTP_PROXY: http://12.26.204.100:8080
+    HTTPS_PROXY: http://12.26.204.100:8080
+    NO_PROXY: localhost,127.0.0.1,::1,samsungds.net,*.samsungds.net,*.samsung.net,12.0.0.0/8,10.0.0.0/8,192.0.0.0/8,172.0.0.0/8
+
+x-env-file: &env-file
+  # .env가 없어도(메일 발송 기능을 안 쓰는 경우) 빌드/실행이 되도록
+  # required: false로 둔다. 필요하면 .env.example을 .env로 복사해서 채울 것.
+  - path: .env
+    required: false
+
 services:
-  app:
-    build:
-      context: .
-      # 셸 환경변수 영향을 받지 않도록 리터럴로 고정한다(로컬에 NO_PROXY 등이
-      # 설정돼 있어도 이 값이 그대로 쓰인다). 사외/공용 PyPI로 빌드하려면
-      # 아래 값을 직접 빈 문자열로 바꿔서 빌드할 것.
-      args:
-        PIP_INDEX_URL: http://repository.samsungds.net/repository/proxy-pypi-files.pythonhosted.org/simple
-        PIP_TRUSTED_HOST: repository.samsungds.net
-        HTTP_PROXY: http://12.26.204.100:8080
-        HTTPS_PROXY: http://12.26.204.100:8080
-        NO_PROXY: localhost,127.0.0.1,::1,samsungds.net,*.samsungds.net,*.samsung.net,12.0.0.0/8,10.0.0.0/8,192.0.0.0/8,172.0.0.0/8
+  web:
+    build: *build
     image: confluence-agenda:latest
-    env_file:
-      # .env가 없어도(메일 발송 기능을 안 쓰는 경우) 빌드/실행이 되도록
-      # required: false로 둔다. 필요하면 .env.example을 .env로 복사해서 채울 것.
-      - path: .env
-        required: false
+    env_file: *env-file
+    ports:
+      - "10001:10001"
+
+  cli:
+    build: *build
+    image: confluence-agenda:latest
+    env_file: *env-file
+    command: ["python", "-m", "confluence_agenda.cli"]
     stdin_open: true
     tty: true
