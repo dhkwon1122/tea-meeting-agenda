@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from typing import Sequence, Union
 from urllib.parse import quote
 
 import requests
@@ -60,14 +61,21 @@ def _require_env(name: str) -> str:
     return value
 
 
-def send_report_email(to_email: str, subject: str, body_html: str) -> None:
-    """body_html(HTML)을 to_email에 보낸다.
+def send_report_email(to: Union[str, Sequence[str]], subject: str, body_html: str) -> None:
+    """body_html(HTML)을 to(문자열 하나 또는 이메일 주소 목록)에 보낸다.
+
+    문자열 하나를 넘기면 수신자 한 명, 목록을 넘기면 한 통의 메일을
+    여러 명에게(recipients 배열에 모두 담아) 동시에 보낸다.
 
     MAIL_API_TOKEN/MAIL_API_SYSTEM_ID/MAIL_API_USER_ID 중 하나라도 없으면
     MailConfigError를 던진다. 호출 자체가 실패해도(네트워크 오류, 4xx/5xx
     응답) 원인을 그대로 담아 MailConfigError로 감싸서 던진다 - 호출자가
     화면에 실패 사유를 보여줄 수 있도록.
     """
+    to_emails = [to] if isinstance(to, str) else list(to)
+    if not to_emails:
+        raise MailConfigError("받는 사람이 한 명 이상 필요합니다.")
+
     token = _require_env("MAIL_API_TOKEN")
     system_id = _require_env("MAIL_API_SYSTEM_ID")
     user_id = _require_env("MAIL_API_USER_ID")
@@ -93,7 +101,7 @@ def send_report_email(to_email: str, subject: str, body_html: str) -> None:
         "contentType": "html",
         "docSecuType": "PERSONAL",
         "sender": {"emailAddress": sender_address},
-        "recipients": [{"emailAddress": to_email, "recipientType": "TO"}],
+        "recipients": [{"emailAddress": addr, "recipientType": "TO"} for addr in to_emails],
     }
     # 한글이 섞이므로 인코딩을 명시적으로 UTF-8 바이트로 고정한다 (str로
     # 넘기면 라이브러리가 기본 인코딩을 쓸 수 있어서 깨질 수 있다).

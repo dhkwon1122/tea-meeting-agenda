@@ -83,6 +83,33 @@ class MailerTest(unittest.TestCase):
             payload["recipients"], [{"emailAddress": "someone@example.com", "recipientType": "TO"}]
         )
 
+    def test_accepts_multiple_recipients_in_one_call(self):
+        captured = {}
+
+        def _fake_post(url, headers=None, data=None, timeout=None, proxies=None, verify=None):
+            captured["payload"] = json.loads(data.decode("utf-8"))
+            return _FakeResponse()
+
+        with mock.patch.dict("os.environ", FULL_CONFIG, clear=True), mock.patch(
+            "confluence_agenda.mailer.requests.post", side_effect=_fake_post
+        ):
+            send_report_email(
+                ["a@example.com", "b@example.com"], subject="제목", body_html="<p>본문</p>"
+            )
+
+        self.assertEqual(
+            captured["payload"]["recipients"],
+            [
+                {"emailAddress": "a@example.com", "recipientType": "TO"},
+                {"emailAddress": "b@example.com", "recipientType": "TO"},
+            ],
+        )
+
+    def test_raises_when_recipient_list_empty(self):
+        with mock.patch.dict("os.environ", FULL_CONFIG, clear=True):
+            with self.assertRaisesRegex(MailConfigError, "받는 사람"):
+                send_report_email([], subject="제목", body_html="<p>본문</p>")
+
     def test_defaults_sender_to_user_id(self):
         captured = {}
 

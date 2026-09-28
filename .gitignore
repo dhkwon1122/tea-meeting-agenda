@@ -8,3 +8,6 @@ certs/*.pem
 # 로컬 메일 API 자격증명
 .env
 
+# 웹 UI 수신자 태그 목록(이름/이메일 개인정보) - contacts.example.json 참고
+contacts.json
+

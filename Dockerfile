@@ -10,6 +10,11 @@
 #   # 사내 CA 인증서가 필요하면 빌드 전에 certs/ 에 *.crt 를 넣어둔다.
 #   #   cp 사내루트CA.crt certs/corp-root-ca.crt
 #
+#   # 웹 UI에 자주 쓰는 수신자를 태그로 띄우려면 빌드 전에 저장소 루트에
+#   # contacts.json 을 만든다(개인정보라 git에는 커밋하지 않음 — 형식은
+#   # contacts.example.json 참고). 없어도 빌드/실행은 그대로 되고, 그 경우
+#   # 화면에는 자유 입력란만 나온다.
+#
 # ── 빌드 예시 (사외 / 공용 PyPI) ───────────────────────────────────
 #   docker build \
 #     --build-arg PIP_INDEX_URL= --build-arg PIP_TRUSTED_HOST= \

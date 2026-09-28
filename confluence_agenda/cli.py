@@ -12,7 +12,7 @@ Confluence 에디터의 '마크업 삽입'에 그대로 붙여넣을 storage-for
 사용 예:
     python -m confluence_agenda.cli                       # 화면에 바로 출력
     python -m confluence_agenda.cli -o out.xml             # 파일로도 저장
-    python -m confluence_agenda.cli --to me@example.com    # 생성 후 메일도 자동 발송
+    python -m confluence_agenda.cli --to me@example.com,other@example.com  # 생성 후 메일도 자동 발송
 """
 from __future__ import annotations
 
@@ -39,21 +39,25 @@ def prompt_items() -> List[AgendaItem]:
     return items
 
 
-def _resolve_recipient(cli_to: Optional[str]) -> Optional[str]:
+def _split_emails(raw: str) -> List[str]:
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _resolve_recipients(cli_to: Optional[str]) -> List[str]:
     if cli_to:
-        return cli_to
+        return _split_emails(cli_to)
     if not is_mail_configured():
-        return None
+        return []
     answer = input("\n메일로도 보낼까요? (y/N): ").strip().lower()
     if answer != "y":
-        return None
-    return input("받는 사람 이메일: ").strip()
+        return []
+    return _split_emails(input("받는 사람 이메일 (콤마로 여러 명 가능): "))
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Confluence 안건 보고 페이지 소스 생성기")
     parser.add_argument("-o", "--output", help="storage-format 소스를 저장할 파일 경로 (생략 시 화면 출력)")
-    parser.add_argument("--to", help="안건 요약을 보낼 이메일 주소 (지정하면 생성 후 자동 발송)")
+    parser.add_argument("--to", help="안건 요약을 보낼 이메일 주소, 콤마로 여러 명 (지정하면 생성 후 자동 발송)")
     parser.add_argument("--subject", help="메일 제목 (생략 시 자동 생성)")
     args = parser.parse_args(argv)
 
@@ -68,8 +72,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("\n=== 아래 소스를 Confluence 편집기 '마크업 삽입'에 붙여넣으세요 ===\n")
         print(body_storage)
 
-    to_email = _resolve_recipient(args.to)
-    if to_email:
+    to_emails = _resolve_recipients(args.to)
+    if to_emails:
         if not is_mail_configured():
             print(
                 "\nMAIL_API_TOKEN 등 메일 API 환경변수가 설정되지 않아 메일을 보낼 수 없습니다.",
@@ -78,11 +82,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 1
         subject = args.subject or build_email_subject(items)
         try:
-            send_report_email(to_email, subject=subject, body_html=build_agenda_email_html(items))
+            send_report_email(to_emails, subject=subject, body_html=build_agenda_email_html(items))
         except MailConfigError as e:
             print(f"\n메일 발송 실패: {e}", file=sys.stderr)
             return 1
-        print(f"\n메일을 보냈습니다: {to_email}")
+        print(f"\n메일을 보냈습니다: {', '.join(to_emails)}")
 
     return 0
 
