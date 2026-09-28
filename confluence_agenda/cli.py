@@ -80,9 +80,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                 file=sys.stderr,
             )
             return 1
-        subject = args.subject or build_email_subject(items)
+        subject = args.subject or build_email_subject()
         try:
-            send_report_email(to_emails, subject=subject, body_html=build_agenda_email_html(items))
+            send_report_email(to_emails, subject=subject, body_html=build_agenda_email_html(body_storage))
         except MailConfigError as e:
             print(f"\n메일 발송 실패: {e}", file=sys.stderr)
             return 1

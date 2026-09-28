@@ -1,5 +1,6 @@
 import re
 import unittest
+from datetime import date
 
 from confluence_agenda.builder import (
     AgendaItem,
@@ -94,35 +95,46 @@ class BuildAgendaPageBodyTest(unittest.TestCase):
 
 
 class BuildAgendaEmailHtmlTest(unittest.TestCase):
-    def test_requires_at_least_one_item(self):
-        with self.assertRaises(ValueError):
-            build_agenda_email_html([])
+    def test_wraps_full_source_verbatim_for_copy_paste(self):
+        source = build_agenda_page_body([AgendaItem(title="예산 승인")])
+        result = build_agenda_email_html(source)
 
-    def test_lists_titles_as_ordered_list(self):
-        items = [AgendaItem(title="예산 승인"), AgendaItem(title="채용 계획")]
-        result = build_agenda_email_html(items)
+        # 이스케이프된 형태로라도 전체 소스가 그대로 담겨 있어야 한다
+        # (메일에는 제목만 오고 본문 소스가 빠지는 문제의 회귀 테스트).
+        self.assertIn("<pre", result)
+        self.assertIn("(첨부 1) 예산 승인", result)
+        self.assertIn("ui-expand", result)
+        self.assertIn("include", result)
 
-        self.assertIn("<ol>", result)
-        self.assertIn("<li>예산 승인</li>", result)
-        self.assertIn("<li>채용 계획</li>", result)
-        # ac:* Confluence 매크로는 메일 클라이언트가 렌더링 못하므로 섞이면 안 된다.
-        self.assertNotIn("ac:structured-macro", result)
-
-    def test_escapes_html_in_titles(self):
-        items = [AgendaItem(title="<script>alert(1)</script>")]
-        result = build_agenda_email_html(items)
+    def test_escapes_html_in_source(self):
+        result = build_agenda_email_html("<script>alert(1)</script>")
 
         self.assertNotIn("<script>alert(1)</script>", result)
         self.assertIn("&lt;script&gt;", result)
 
 
 class BuildEmailSubjectTest(unittest.TestCase):
-    def test_single_item(self):
-        self.assertEqual(build_email_subject([AgendaItem(title="예산 승인")]), "[안건 보고] 예산 승인")
+    def test_fixed_template_with_date_and_korean_weekday(self):
+        # 2026-09-21은 월요일.
+        self.assertEqual(date(2026, 9, 21).weekday(), 0)
+        self.assertEqual(
+            build_email_subject(on=date(2026, 9, 21)),
+            "[보고] 9.21(월) 스탭팀장 미팅 피플팀 안건",
+        )
 
-    def test_multiple_items_add_count_suffix(self):
-        items = [AgendaItem(title="예산 승인"), AgendaItem(title="채용 계획")]
-        self.assertEqual(build_email_subject(items), "[안건 보고] 예산 승인 외 1건")
+    def test_does_not_zero_pad_month_or_day(self):
+        self.assertEqual(
+            build_email_subject(on=date(2026, 3, 5)),
+            "[보고] 3.5(목) 스탭팀장 미팅 피플팀 안건",
+        )
+
+    def test_subject_is_independent_of_agenda_content(self):
+        # 안건 제목이 몇 개든, 무엇이든 제목 문구에 전혀 영향을 주지 않는다.
+        same_day = date(2026, 9, 21)
+        self.assertEqual(build_email_subject(on=same_day), build_email_subject(on=same_day))
+
+    def test_defaults_to_today_when_no_date_given(self):
+        self.assertEqual(build_email_subject(), build_email_subject(on=date.today()))
 
 
 if __name__ == "__main__":

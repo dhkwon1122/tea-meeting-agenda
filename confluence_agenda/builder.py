@@ -29,6 +29,7 @@ from __future__ import annotations
 import html
 import uuid
 from dataclasses import dataclass
+from datetime import date
 from typing import List, Optional, Sequence, Union
 
 # 문자열 하나 또는 줄 단위 문자열 목록을 본문으로 받는다.
@@ -185,26 +186,32 @@ def build_agenda_page_body(
     return "\n".join(p for p in parts if p)
 
 
-def build_email_subject(items: Sequence[AgendaItem]) -> str:
-    """메일 제목. 첫 안건 제목 + "외 N건"을 붙인다."""
-    if not items:
-        return "[안건 보고]"
-    suffix = f" 외 {len(items) - 1}건" if len(items) > 1 else ""
-    return f"[안건 보고] {items[0].title}{suffix}"
+_KOREAN_WEEKDAYS = ["월", "화", "수", "목", "금", "토", "일"]
 
 
-def build_agenda_email_html(items: Sequence[AgendaItem], intro: Optional[TextInput] = None) -> str:
-    """Confluence storage-format의 ac:* 매크로는 일반 메일 클라이언트가 렌더링하지
-    못하므로, 메일 본문용으로 안건 제목만 깔끔한 순서 목록(HTML)으로 만든다.
+def build_email_subject(on: Optional[date] = None) -> str:
+    """메일 제목. 안건 내용과 무관하게 항상 고정 문구 + 날짜로 만든다.
+
+    예: 9월 21일(월)이면 "[보고] 9.21(월) 스탭팀장 미팅 피플팀 안건".
+    안건 제목이 아니라 오늘 날짜(또는 on으로 넘긴 날짜) 기준이라, 생성된
+    Confluence 소스 내용을 고쳐도 제목에는 영향이 없다.
     """
-    if not items:
-        raise ValueError("최소 1개 이상의 안건이 필요합니다.")
+    d = on or date.today()
+    weekday = _KOREAN_WEEKDAYS[d.weekday()]
+    return f"[보고] {d.month}.{d.day}({weekday}) 스탭팀장 미팅 피플팀 안건"
 
-    parts: List[str] = ["<h2>안건 보고</h2>"]
-    if intro:
-        parts.append(_paragraphs_html(intro))
 
-    items_html = "\n".join(f"<li>{html.escape(item.title)}</li>" for item in items)
-    parts.append(f"<ol>\n{items_html}\n</ol>")
-
-    return "\n".join(parts)
+def build_agenda_email_html(source: str) -> str:
+    """Confluence storage-format의 ac:* 매크로는 일반 메일 클라이언트가 렌더링하지
+    못하므로, source(build_agenda_page_body의 결과 전체)를 그대로 복사해 쓸 수
+    있도록 <pre> 블록에 이스케이프해서 담는다.
+    """
+    escaped = html.escape(source)
+    return (
+        "<p>아래 내용을 전체 선택해서 복사한 뒤, Confluence 편집기 "
+        "<strong>⋯(더보기) 메뉴 → 마크업 삽입</strong>에 붙여넣으세요.</p>"
+        '<pre style="white-space:pre-wrap; word-break:break-all; background:#f1f3f4; '
+        "color:#202124; padding:16px; border-radius:8px; "
+        "font-family:'SFMono-Regular',Consolas,monospace; font-size:13px; line-height:1.6;\">"
+        f"{escaped}</pre>"
+    )

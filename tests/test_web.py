@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from confluence_agenda.builder import build_email_subject
 from confluence_agenda.web.app import app
 
 _TEST_CONTACTS = [
@@ -107,9 +108,38 @@ class WebAppTest(unittest.TestCase):
         fake_send.assert_called_once()
         args, kwargs = fake_send.call_args
         self.assertEqual(args[0], ["someone@example.com"])
-        self.assertEqual(kwargs["subject"], "[안건 보고] 예산안 승인 외 1건")
-        self.assertIn("<li>예산안 승인</li>", kwargs["body_html"])
+        # 제목은 안건 내용과 무관하게 고정 날짜 템플릿을 쓴다.
+        self.assertEqual(kwargs["subject"], build_email_subject())
+        # 메일 본문에는 (제목만이 아니라) 생성된 전체 소스가 그대로 들어가야 한다.
+        self.assertIn("1. 예산안 승인", kwargs["body_html"])
+        self.assertIn("2. 채용 계획", kwargs["body_html"])
+        self.assertIn("ui-expand", kwargs["body_html"])
         self.assertIn("메일을 보냈습니다: someone@example.com".encode(), resp.data)
+
+    def test_send_mail_uses_custom_subject_when_provided(self):
+        env = {"MAIL_API_TOKEN": "t", "MAIL_API_SYSTEM_ID": "s", "MAIL_API_USER_ID": "u"}
+        with mock.patch.dict("os.environ", env, clear=True), mock.patch(
+            "confluence_agenda.web.app.send_report_email"
+        ) as fake_send:
+            resp = self.client.post(
+                "/",
+                data={
+                    "titles": "예산안 승인",
+                    "action": "send_mail",
+                    "extra_to": "someone@example.com",
+                    "subject": "직접 수정한 제목",
+                },
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        _, kwargs = fake_send.call_args
+        self.assertEqual(kwargs["subject"], "직접 수정한 제목")
+
+    def test_get_index_prefills_fixed_default_subject(self):
+        env = {"MAIL_API_TOKEN": "t", "MAIL_API_SYSTEM_ID": "s", "MAIL_API_USER_ID": "u"}
+        with mock.patch.dict("os.environ", env, clear=True):
+            resp = self.client.get("/")
+        self.assertIn(f'value="{build_email_subject()}"'.encode(), resp.data)
 
     def test_send_mail_to_preset_chips_and_extra_address_combined(self):
         env = {

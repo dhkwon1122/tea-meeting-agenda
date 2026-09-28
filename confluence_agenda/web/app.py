@@ -33,89 +33,163 @@ PAGE_TEMPLATE = """
 <html lang="ko">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Confluence 안건 보고 소스 생성기</title>
 <style>
-  body { font-family: -apple-system, "Malgun Gothic", sans-serif; max-width: 860px;
-         margin: 2rem auto; padding: 0 1rem; color: #172b4d; }
-  h1 { font-size: 1.4rem; }
-  textarea { width: 100%; box-sizing: border-box; font-family: "SFMono-Regular", Consolas, monospace;
-             font-size: 0.85rem; }
-  #titles { height: 200px; }
-  #output { height: 320px; margin-top: 0.5rem; }
-  .row { margin: 1rem 0; }
-  .hint { color: #6b778c; font-size: 0.85rem; }
-  button { padding: 0.5rem 1rem; margin-right: 0.5rem; cursor: pointer; }
-  .message { padding: 0.6rem 0.8rem; border-radius: 4px; margin: 1rem 0; }
-  .message.ok { background: #e3fcef; color: #006644; }
-  .message.error { background: #ffebe6; color: #bf2600; }
-  input[type=text] { padding: 0.4rem; width: 100%; box-sizing: border-box; }
-  label.field-label { display: block; font-size: 0.85rem; color: #42526e; margin-bottom: 0.3rem; }
+  :root {
+    --blue: #1a73e8;
+    --blue-dark: #1765cc;
+    --blue-tint: #e8f0fe;
+    --text: #202124;
+    --text-muted: #5f6368;
+    --border: #dadce0;
+    --surface: #ffffff;
+    --bg: #f8f9fa;
+    --ok-bg: #e6f4ea;
+    --ok-text: #137333;
+    --error-bg: #fce8e6;
+    --error-text: #c5221f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Google Sans", Roboto, -apple-system, BlinkMacSystemFont, "Segoe UI",
+                 "Malgun Gothic", Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 40px 16px 64px;
+  }
+  .page { max-width: 720px; margin: 0 auto; }
+  header { margin-bottom: 28px; }
+  h1 { font-size: 1.5rem; font-weight: 500; margin: 0 0 6px; }
+  .subtitle { color: var(--text-muted); font-size: 0.9rem; margin: 0; }
 
-  .chip-group { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.6rem; }
-  .chip input[type=checkbox] { position: absolute; opacity: 0; pointer-events: none; }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 20px;
+  }
+  .card h2 {
+    font-size: 0.95rem; font-weight: 500; color: var(--text-muted);
+    margin: 0 0 16px; text-transform: uppercase; letter-spacing: 0.03em;
+  }
+
+  .field { margin-bottom: 18px; }
+  .field:last-child { margin-bottom: 0; }
+  .field label { display: block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 6px; }
+
+  textarea, input[type=text] {
+    width: 100%; border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; font-size: 0.9rem; color: var(--text);
+    font-family: inherit; background: var(--surface); transition: border-color .15s, box-shadow .15s;
+  }
+  textarea:focus, input[type=text]:focus {
+    outline: none; border-color: var(--blue); box-shadow: 0 0 0 1px var(--blue);
+  }
+  #titles { height: 180px; resize: vertical; }
+  #output {
+    height: 300px; resize: vertical; font-family: "SFMono-Regular", Consolas, monospace;
+    font-size: 0.8rem; background: var(--bg); color: var(--text-muted);
+  }
+
+  .chip-group { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip input[type=checkbox] { position: absolute; opacity: 0; width: 0; height: 0; }
   .chip label {
-    display: inline-block; padding: 0.35rem 0.9rem; border-radius: 999px;
-    border: 1px solid #dfe1e6; background: #f4f5f7; color: #42526e;
-    font-size: 0.85rem; cursor: pointer; user-select: none;
+    display: inline-flex; align-items: center; padding: 6px 14px; border-radius: 999px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--text-muted);
+    font-size: 0.85rem; cursor: pointer; user-select: none; transition: all .15s; margin: 0;
   }
   .chip input[type=checkbox]:checked + label {
-    background: #deebff; border-color: #4c9aff; color: #0052cc; font-weight: 600;
+    background: var(--blue-tint); border-color: var(--blue); color: var(--blue); font-weight: 500;
   }
-  .chip input[type=checkbox]:focus-visible + label { outline: 2px solid #4c9aff; }
+  .chip input[type=checkbox]:focus-visible + label { outline: 2px solid var(--blue); outline-offset: 1px; }
+
+  .actions { display: flex; gap: 10px; margin-top: 4px; }
+  button {
+    font-family: inherit; font-size: 0.9rem; font-weight: 500; border-radius: 20px;
+    padding: 10px 22px; cursor: pointer; border: 1px solid transparent; transition: all .15s;
+  }
+  button.primary { background: var(--blue); color: #fff; }
+  button.primary:hover { background: var(--blue-dark); }
+  button.secondary { background: var(--surface); color: var(--blue); border-color: var(--border); }
+  button.secondary:hover { background: var(--blue-tint); border-color: var(--blue); }
+
+  .message {
+    padding: 12px 16px; border-radius: 8px; margin-bottom: 20px; font-size: 0.88rem;
+  }
+  .message.ok { background: var(--ok-bg); color: var(--ok-text); }
+  .message.error { background: var(--error-bg); color: var(--error-text); }
+
+  .output-actions { margin-top: 12px; }
 </style>
 </head>
 <body>
-  <h1>Confluence 안건 보고 소스 생성기</h1>
-  <p class="hint">안건 제목을 한 줄에 하나씩 입력하세요 (대략 10개 내외 권장).</p>
+<div class="page">
+  <header>
+    <h1>Confluence 안건 보고 소스 생성기</h1>
+    <p class="subtitle">안건 제목을 한 줄에 하나씩 입력하세요 (대략 10개 내외 권장).</p>
+  </header>
 
   {% if message %}
     <div class="message {{ 'ok' if message_ok else 'error' }}">{{ message }}</div>
   {% endif %}
 
   <form method="post">
-    <div class="row">
-      <textarea id="titles" name="titles"
-                placeholder="예산안 승인&#10;채용 계획&#10;...">{{ titles_text }}</textarea>
+    <div class="card">
+      <h2>안건</h2>
+      <div class="field">
+        <textarea id="titles" name="titles"
+                  placeholder="예산안 승인&#10;채용 계획&#10;...">{{ titles_text }}</textarea>
+      </div>
     </div>
 
     {% if mail_configured %}
-    <div class="row">
-      <span class="field-label">받는 사람</span>
-      <div class="chip-group">
-        {% for name, email in preset_contacts %}
-        <span class="chip">
-          <input type="checkbox" id="preset-{{ loop.index }}" name="preset_to" value="{{ email }}"
-                 {% if email in selected_presets %}checked{% endif %}>
-          <label for="preset-{{ loop.index }}">{{ name }}</label>
-        </span>
-        {% endfor %}
+    <div class="card">
+      <h2>메일 발송</h2>
+      <div class="field">
+        <label>받는 사람</label>
+        <div class="chip-group">
+          {% for name, email in preset_contacts %}
+          <span class="chip">
+            <input type="checkbox" id="preset-{{ loop.index }}" name="preset_to" value="{{ email }}"
+                   {% if email in selected_presets %}checked{% endif %}>
+            <label for="preset-{{ loop.index }}">{{ name }}</label>
+          </span>
+          {% endfor %}
+        </div>
       </div>
-      <label class="field-label" for="extra_to">그 외 이메일 (콤마로 구분)</label>
-      <input type="text" id="extra_to" name="extra_to" value="{{ extra_to }}"
-             placeholder="someone@example.com, other@example.com">
-    </div>
-    <div class="row">
-      <label class="field-label" for="subject">메일 제목(선택)</label>
-      <input type="text" id="subject" name="subject" value="{{ subject }}" placeholder="생략 시 자동 생성">
+      <div class="field">
+        <label for="extra_to">그 외 이메일 (콤마로 구분)</label>
+        <input type="text" id="extra_to" name="extra_to" value="{{ extra_to }}"
+               placeholder="someone@example.com, other@example.com">
+      </div>
+      <div class="field">
+        <label for="subject">메일 제목</label>
+        <input type="text" id="subject" name="subject" value="{{ subject }}">
+      </div>
     </div>
     {% endif %}
 
-    <div class="row">
-      <button type="submit" name="action" value="generate">소스 생성</button>
+    <div class="actions">
+      <button class="primary" type="submit" name="action" value="generate">소스 생성</button>
       {% if mail_configured %}
-      <button type="submit" name="action" value="send_mail">메일로 보내기</button>
+      <button class="secondary" type="submit" name="action" value="send_mail">메일로 보내기</button>
       {% endif %}
     </div>
   </form>
 
   {% if output %}
-  <div class="row">
+  <div class="card">
+    <h2>생성된 소스</h2>
     <textarea id="output" readonly>{{ output }}</textarea>
-    <div style="margin-top:0.5rem;">
-      <button type="button" onclick="copyOutput()">소스 복사</button>
+    <div class="output-actions">
+      <button class="secondary" type="button" onclick="copyOutput()">소스 복사</button>
     </div>
   </div>
   {% endif %}
+</div>
 
   <script>
     function copyOutput() {
@@ -149,10 +223,15 @@ def index():
     def display_name(email: str) -> str:
         return preset_email_to_name.get(email, email)
 
+    # 메일 제목은 안건 내용과 무관하게 오늘 날짜 기준 고정 문구다. 화면에
+    # 미리 채워둬서 "소스를 고쳐도 제목은 안 바뀐다"는 걸 바로 보여준다 -
+    # 다른 문구가 필요하면 이 칸에서 직접 덮어쓰면 된다.
+    default_subject = build_email_subject()
+
     titles_text = ""
     selected_presets: List[str] = []
     extra_to = ""
-    subject = ""
+    subject = default_subject
     output: Optional[str] = None
     message: Optional[str] = None
     message_ok = True
@@ -161,7 +240,7 @@ def index():
         titles_text = request.form.get("titles", "")
         selected_presets = request.form.getlist("preset_to")
         extra_to = request.form.get("extra_to", "")
-        subject = request.form.get("subject", "").strip()
+        subject = request.form.get("subject", "").strip() or default_subject
         action = request.form.get("action")
 
         titles = _parse_titles(titles_text)
@@ -185,8 +264,8 @@ def index():
                     try:
                         send_report_email(
                             recipients,
-                            subject=subject or build_email_subject(items),
-                            body_html=build_agenda_email_html(items),
+                            subject=subject,
+                            body_html=build_agenda_email_html(output),
                         )
                         names = ", ".join(display_name(addr) for addr in recipients)
                         message, message_ok = f"메일을 보냈습니다: {names}", True
