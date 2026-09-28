@@ -7,6 +7,7 @@ from .builder import (
     build_agenda_page_body,
     build_email_subject,
     heading_html,
+    layout_section,
 )
 from .mailer import MailConfigError, is_mail_configured, send_report_email
 
@@ -19,6 +20,7 @@ __all__ = [
     "anchor_link",
     "heading_html",
     "attachment_section_html",
+    "layout_section",
     "is_mail_configured",
     "send_report_email",
     "MailConfigError",

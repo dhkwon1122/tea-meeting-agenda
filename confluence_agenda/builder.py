@@ -1,21 +1,22 @@
 """Confluence 안건 보고 페이지의 storage-format 소스(복붙용)를 생성하는 코어 로직.
 
-생성되는 구조:
+생성되는 구조 (안건 하나하나, 첨부 하나하나가 각각 ac:layout-section으로
+나뉜 별도 섹션이라 Confluence에서 시각적으로 구분된다):
 
-    1. 안건1 (첨부1)   <- "(첨부1)"은 "첨부1" 앵커(하단 ui-expand 앞)로 이동하는 링크
-                          (이 줄 자체에 "제목1" 앵커가 심어져, 아래에서 되돌아올 수 있음)
-       (본문 자리표시자 3줄)
-    2. 안건2 (첨부2)
-       (본문 자리표시자 3줄)
+    [layout-section] 1. 안건1 (첨부1)   <- "(첨부1)"은 "첨부1" 앵커(하단 ui-expand 앞)로 이동하는 링크
+                        (이 줄 자체에 "제목1" 앵커가 심어져, 아래에서 되돌아올 수 있음)
+                        (본문 자리표시자 3줄)
+    [layout-section] 2. 안건2 (첨부2)
+                        (본문 자리표시자 3줄)
     ...
 
-    [anchor: 첨부1]
-    ▽ ui-expand: "(첨부 1) 안건1"
-        - include 매크로로 같은 제목의 하위 페이지("(첨부 1) 안건1")를 포함
-        - "제목1" 앵커로 돌아가는 "(돌아가기)" 링크
-    [anchor: 첨부2]
-    ▽ ui-expand: "(첨부 2) 안건2"
-        ...
+    [layout-section] [anchor: 첨부1]
+                      ▽ ui-expand: "(첨부 1) 안건1"
+                          - include 매크로로 같은 제목의 하위 페이지("(첨부 1) 안건1")를 포함
+                          - "제목1" 앵커로 돌아가는 "(돌아가기)" 링크
+    [layout-section] [anchor: 첨부2]
+                      ▽ ui-expand: "(첨부 2) 안건2"
+                        ...
 
 앵커 이름 규칙(팀 컨플루언스 매크로 소스 기준):
     - 안건 제목 줄에 심는 앵커: "제목{N}" (공백 없음)
@@ -73,6 +74,15 @@ def _resolve_body_html(item: "AgendaItem") -> str:
 
 def _new_macro_id() -> str:
     return str(uuid.uuid4())
+
+
+def layout_section(content: str) -> str:
+    """content를 단일 컬럼 레이아웃 섹션(ac:layout-section/ac:layout-cell)으로 감싼다.
+
+    안건별로 시각적으로 구분되는 블록이 되도록, 안건 하나하나(제목+본문)와
+    첨부 ui-expand 하나하나를 각각 이 섹션으로 감싼다.
+    """
+    return f'<ac:layout-section ac:type="single"><ac:layout-cell>\n{content}\n</ac:layout-cell></ac:layout-section>'
 
 
 def anchor_macro(name: str) -> str:
@@ -144,7 +154,7 @@ def attachment_section_html(index: int, title: str) -> str:
         f"</ac:structured-macro>"
     )
 
-    return anchor_macro(attachment_anchor) + "\n" + ui_expand_html
+    return layout_section(anchor_macro(attachment_anchor) + "\n" + ui_expand_html)
 
 
 @dataclass
@@ -169,21 +179,21 @@ def build_agenda_page_body(
     if not items:
         raise ValueError("최소 1개 이상의 안건이 필요합니다.")
 
-    parts: List[str] = []
+    sections: List[str] = []
 
     if intro:
-        parts.append(_paragraphs_html(intro))
+        sections.append(layout_section(_paragraphs_html(intro)))
 
-    # 1) 안건 목록 (각 제목 옆에 "(첨부N)" 링크 + "제목N" 앵커, 본문 자리표시자)
+    # 1) 안건 목록: 안건 하나(제목 + 본문)가 레이아웃 섹션 하나
     for idx, item in enumerate(items, start=1):
-        parts.append(heading_html(idx, item.title))
-        parts.append(_resolve_body_html(item))
+        content = heading_html(idx, item.title) + "\n" + _resolve_body_html(item)
+        sections.append(layout_section(content))
 
-    # 2) 첨부 ui-expand 목록 ("첨부N" 앵커 + 하위 페이지 include + "(돌아가기)" 링크)
+    # 2) 첨부 ui-expand 목록: 첨부 하나("첨부N" 앵커 + ui-expand)가 레이아웃 섹션 하나
     for idx, item in enumerate(items, start=1):
-        parts.append(attachment_section_html(idx, item.title))
+        sections.append(attachment_section_html(idx, item.title))
 
-    return "\n".join(p for p in parts if p)
+    return "<ac:layout>\n" + "\n".join(sections) + "\n</ac:layout>"
 
 
 _KOREAN_WEEKDAYS = ["월", "화", "수", "목", "금", "토", "일"]

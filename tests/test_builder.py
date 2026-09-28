@@ -15,6 +15,38 @@ class BuildAgendaPageBodyTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_agenda_page_body([])
 
+    def test_wraps_whole_body_in_a_single_ac_layout(self):
+        result = build_agenda_page_body([AgendaItem(title="A"), AgendaItem(title="B")])
+
+        self.assertTrue(result.startswith("<ac:layout>"))
+        self.assertTrue(result.endswith("</ac:layout>"))
+        self.assertEqual(result.count("<ac:layout>"), 1)
+        self.assertEqual(result.count("</ac:layout>"), 1)
+
+    def test_each_agenda_and_each_attachment_is_its_own_layout_section(self):
+        # 안건 2개 -> 제목+본문 섹션 2개 + 첨부 섹션 2개 = 총 4개 섹션으로
+        # 나뉘어야 Confluence에서 안건별로 시각적으로 구분된다.
+        items = [AgendaItem(title="A"), AgendaItem(title="B")]
+        result = build_agenda_page_body(items)
+
+        self.assertEqual(result.count('<ac:layout-section ac:type="single">'), 4)
+        self.assertEqual(result.count("<ac:layout-cell>"), 4)
+        self.assertEqual(result.count("</ac:layout-cell></ac:layout-section>"), 4)
+
+    def test_heading_and_body_share_one_section_while_attachment_is_separate(self):
+        items = [AgendaItem(title="예산 승인", body="본문 내용")]
+        result = build_agenda_page_body(items)
+
+        first_section_end = result.index("</ac:layout-cell></ac:layout-section>")
+        first_section = result[: first_section_end + len("</ac:layout-cell></ac:layout-section>")]
+
+        # 제목과 본문은 같은(첫 번째) 섹션 안에 함께 있어야 한다.
+        self.assertIn("1. 예산 승인", first_section)
+        self.assertIn("<p>본문 내용</p>", first_section)
+        # 첨부 ui-expand는 첫 번째 섹션에는 없고 그 뒤에 나온다.
+        self.assertNotIn("ui-expand", first_section)
+        self.assertIn("ui-expand", result[first_section_end:])
+
     def test_default_body_is_three_placeholder_lines(self):
         items = [AgendaItem(title="예산 승인")]
         result = build_agenda_page_body(items)
