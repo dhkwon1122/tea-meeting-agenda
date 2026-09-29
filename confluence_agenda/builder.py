@@ -1,7 +1,8 @@
 """Confluence 안건 보고 페이지의 storage-format 소스(복붙용)를 생성하는 코어 로직.
 
-생성되는 구조 (안건 하나하나, 첨부 하나하나가 각각 ac:layout-section으로
-나뉜 별도 섹션이라 Confluence에서 시각적으로 구분된다):
+생성되는 구조 (본문에 해당하는 안건 하나하나는 각자 별도의
+ac:layout-section이라 Confluence에서 시각적으로 구분되고, 첨부 ui-expand
+전체는 안건별로 나누지 않고 하나의 ac:layout-section에 다 같이 담긴다):
 
     [layout-section] 1. 안건1 (첨부1)   <- "(첨부1)"은 "첨부1" 앵커(하단 ui-expand 앞)로 이동하는 링크
                         (이 줄 자체에 "제목1" 앵커가 심어져, 아래에서 되돌아올 수 있음)
@@ -10,13 +11,14 @@
                         (본문 자리표시자 3줄)
     ...
 
-    [layout-section] [anchor: 첨부1]
-                      ▽ ui-expand: "(첨부 1) 안건1"
-                          - include 매크로로 같은 제목의 하위 페이지("(첨부 1) 안건1")를 포함
-                          - "제목1" 앵커로 돌아가는 "(돌아가기)" 링크
-    [layout-section] [anchor: 첨부2]
-                      ▽ ui-expand: "(첨부 2) 안건2"
-                        ...
+    [layout-section]
+        [anchor: 첨부1]
+        ▽ ui-expand: "(첨부 1) 안건1"
+            - include 매크로로 같은 제목의 하위 페이지("(첨부 1) 안건1")를 포함
+            - "제목1" 앵커로 돌아가는 "(돌아가기)" 링크
+        [anchor: 첨부2]
+        ▽ ui-expand: "(첨부 2) 안건2"
+            ...
 
 앵커 이름 규칙(팀 컨플루언스 매크로 소스 기준):
     - 안건 제목 줄에 심는 앵커: "제목{N}" (공백 없음)
@@ -135,7 +137,11 @@ def _include_page_macro(page_title: str) -> str:
 
 
 def attachment_section_html(index: int, title: str) -> str:
-    """'첨부N' 앵커 + ui-expand 매크로(하위 페이지 include + '(돌아가기)' 링크)."""
+    """'첨부N' 앵커 + ui-expand 매크로(하위 페이지 include + '(돌아가기)' 링크).
+
+    레이아웃 섹션으로 감싸지 않은 조각 하나만 돌려준다 - 모든 안건의 첨부
+    블록을 build_agenda_page_body에서 한 섹션에 몰아 담기 위해서다.
+    """
     attachment_anchor = f"첨부{index}"
     title_anchor = f"제목{index}"
     expand_title = f"(첨부 {index}) {title}"
@@ -154,7 +160,7 @@ def attachment_section_html(index: int, title: str) -> str:
         f"</ac:structured-macro>"
     )
 
-    return layout_section(anchor_macro(attachment_anchor) + "\n" + ui_expand_html)
+    return anchor_macro(attachment_anchor) + "\n" + ui_expand_html
 
 
 @dataclass
@@ -189,9 +195,11 @@ def build_agenda_page_body(
         content = heading_html(idx, item.title) + "\n" + _resolve_body_html(item)
         sections.append(layout_section(content))
 
-    # 2) 첨부 ui-expand 목록: 첨부 하나("첨부N" 앵커 + ui-expand)가 레이아웃 섹션 하나
-    for idx, item in enumerate(items, start=1):
-        sections.append(attachment_section_html(idx, item.title))
+    # 2) 첨부 ui-expand 목록: 안건별로 나누지 않고 전부 하나의 레이아웃 섹션에 담는다.
+    attachments = "\n".join(
+        attachment_section_html(idx, item.title) for idx, item in enumerate(items, start=1)
+    )
+    sections.append(layout_section(attachments))
 
     return "<ac:layout>\n" + "\n".join(sections) + "\n</ac:layout>"
 

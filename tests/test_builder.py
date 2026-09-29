@@ -23,17 +23,17 @@ class BuildAgendaPageBodyTest(unittest.TestCase):
         self.assertEqual(result.count("<ac:layout>"), 1)
         self.assertEqual(result.count("</ac:layout>"), 1)
 
-    def test_each_agenda_and_each_attachment_is_its_own_layout_section(self):
-        # 안건 2개 -> 제목+본문 섹션 2개 + 첨부 섹션 2개 = 총 4개 섹션으로
-        # 나뉘어야 Confluence에서 안건별로 시각적으로 구분된다.
-        items = [AgendaItem(title="A"), AgendaItem(title="B")]
+    def test_each_agenda_has_its_own_section_and_all_attachments_share_one(self):
+        # 안건 3개 -> 제목+본문 섹션 3개(안건별로 구분) + 첨부 섹션 1개(전부
+        # 한 섹션에 몰아 담김) = 총 4개 섹션.
+        items = [AgendaItem(title="A"), AgendaItem(title="B"), AgendaItem(title="C")]
         result = build_agenda_page_body(items)
 
         self.assertEqual(result.count('<ac:layout-section ac:type="single">'), 4)
         self.assertEqual(result.count("<ac:layout-cell>"), 4)
         self.assertEqual(result.count("</ac:layout-cell></ac:layout-section>"), 4)
 
-    def test_heading_and_body_share_one_section_while_attachment_is_separate(self):
+    def test_heading_and_body_share_one_section_per_agenda(self):
         items = [AgendaItem(title="예산 승인", body="본문 내용")]
         result = build_agenda_page_body(items)
 
@@ -46,6 +46,20 @@ class BuildAgendaPageBodyTest(unittest.TestCase):
         # 첨부 ui-expand는 첫 번째 섹션에는 없고 그 뒤에 나온다.
         self.assertNotIn("ui-expand", first_section)
         self.assertIn("ui-expand", result[first_section_end:])
+
+    def test_all_attachments_are_inside_a_single_shared_section(self):
+        items = [AgendaItem(title="A"), AgendaItem(title="B"), AgendaItem(title="C")]
+        result = build_agenda_page_body(items)
+
+        # 마지막 섹션(첨부 전용)만 잘라내서, 그 안에 안건 3개의 ui-expand가
+        # 모두 들어있고 첨부 섹션 자체는 하나뿐인지 확인한다.
+        last_section_start = result.rindex('<ac:layout-section ac:type="single">')
+        last_section = result[last_section_start:]
+
+        self.assertEqual(last_section.count("ui-expand"), 3)
+        self.assertEqual(last_section.count('<ac:layout-section ac:type="single">'), 1)
+        for idx in (1, 2, 3):
+            self.assertIn(f">첨부{idx}<", last_section)
 
     def test_default_body_is_three_placeholder_lines(self):
         items = [AgendaItem(title="예산 승인")]
