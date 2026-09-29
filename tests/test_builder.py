@@ -9,6 +9,16 @@ from confluence_agenda.builder import (
     build_email_subject,
 )
 
+_SECTION_RE = re.compile(
+    r'<ac:layout-section ac:type="single"><ac:layout-cell>\n(.*?)\n</ac:layout-cell></ac:layout-section>',
+    re.S,
+)
+
+
+def _sections(result: str):
+    """result를 레이아웃 섹션 내용 목록(순서대로)으로 쪼갠다."""
+    return _SECTION_RE.findall(result)
+
 
 class BuildAgendaPageBodyTest(unittest.TestCase):
     def test_requires_at_least_one_item(self):
@@ -23,41 +33,50 @@ class BuildAgendaPageBodyTest(unittest.TestCase):
         self.assertEqual(result.count("<ac:layout>"), 1)
         self.assertEqual(result.count("</ac:layout>"), 1)
 
-    def test_each_agenda_has_its_own_section_and_all_attachments_share_one(self):
-        # 안건 3개 -> 제목+본문 섹션 3개(안건별로 구분) + 첨부 섹션 1개(전부
-        # 한 섹션에 몰아 담김) = 총 4개 섹션.
+    def test_section_count_is_setup_plus_one_per_agenda_plus_one_shared_attachment(self):
+        # 안건 3개 -> [준비 섹션 1] + [안건별 섹션 3] + [첨부 공유 섹션 1] = 5개.
         items = [AgendaItem(title="A"), AgendaItem(title="B"), AgendaItem(title="C")]
         result = build_agenda_page_body(items)
 
-        self.assertEqual(result.count('<ac:layout-section ac:type="single">'), 4)
-        self.assertEqual(result.count("<ac:layout-cell>"), 4)
-        self.assertEqual(result.count("</ac:layout-cell></ac:layout-section>"), 4)
+        self.assertEqual(len(_sections(result)), 5)
+
+    def test_first_section_is_the_page_creation_setup(self):
+        items = [AgendaItem(title="예산 승인"), AgendaItem(title="채용 계획")]
+        result = build_agenda_page_body(items)
+        setup_section = _sections(result)[0]
+
+        self.assertIn('ac:name="create-from-template"', setup_section)
+        self.assertIn("<li>(첨부 1) 예산 승인</li>", setup_section)
+        self.assertIn("<li>(첨부 2) 채용 계획</li>", setup_section)
+        # 준비 섹션에는 본문/ui-expand 내용이 섞이면 안 된다.
+        self.assertNotIn("ui-expand", setup_section)
+
+    def test_setup_section_uses_given_template_id_and_button_label(self):
+        items = [AgendaItem(title="예산 승인")]
+        result = build_agenda_page_body(items, template_id="999", button_label="버튼")
+        setup_section = _sections(result)[0]
+
+        self.assertIn('ac:name="templateName">999<', setup_section)
+        self.assertIn('ac:name="templateId">999<', setup_section)
+        self.assertIn('ac:name="buttonLabel">버튼<', setup_section)
 
     def test_heading_and_body_share_one_section_per_agenda(self):
         items = [AgendaItem(title="예산 승인", body="본문 내용")]
         result = build_agenda_page_body(items)
+        agenda_section = _sections(result)[1]
 
-        first_section_end = result.index("</ac:layout-cell></ac:layout-section>")
-        first_section = result[: first_section_end + len("</ac:layout-cell></ac:layout-section>")]
-
-        # 제목과 본문은 같은(첫 번째) 섹션 안에 함께 있어야 한다.
-        self.assertIn("1. 예산 승인", first_section)
-        self.assertIn("<p>본문 내용</p>", first_section)
-        # 첨부 ui-expand는 첫 번째 섹션에는 없고 그 뒤에 나온다.
-        self.assertNotIn("ui-expand", first_section)
-        self.assertIn("ui-expand", result[first_section_end:])
+        # 제목과 본문은 같은 섹션 안에 함께 있어야 한다.
+        self.assertIn("1. 예산 승인", agenda_section)
+        self.assertIn("<p>본문 내용</p>", agenda_section)
+        # 첨부 ui-expand는 이 섹션에는 없다.
+        self.assertNotIn("ui-expand", agenda_section)
 
     def test_all_attachments_are_inside_a_single_shared_section(self):
         items = [AgendaItem(title="A"), AgendaItem(title="B"), AgendaItem(title="C")]
         result = build_agenda_page_body(items)
-
-        # 마지막 섹션(첨부 전용)만 잘라내서, 그 안에 안건 3개의 ui-expand가
-        # 모두 들어있고 첨부 섹션 자체는 하나뿐인지 확인한다.
-        last_section_start = result.rindex('<ac:layout-section ac:type="single">')
-        last_section = result[last_section_start:]
+        last_section = _sections(result)[-1]
 
         self.assertEqual(last_section.count("ui-expand"), 3)
-        self.assertEqual(last_section.count('<ac:layout-section ac:type="single">'), 1)
         for idx in (1, 2, 3):
             self.assertIn(f">첨부{idx}<", last_section)
 

@@ -4,6 +4,10 @@
 ac:layout-section이라 Confluence에서 시각적으로 구분되고, 첨부 ui-expand
 전체는 안건별로 나누지 않고 하나의 ac:layout-section에 다 같이 담긴다):
 
+    [layout-section] "템플릿에서 페이지 만들기" 버튼 + 만들어야 할 하위 페이지
+                      제목 목록("(첨부 1) 안건1", "(첨부 2) 안건2", ...).
+                      이 버튼으로 include 매크로가 참조할 하위 페이지를 실제로
+                      만든 뒤에는, 이 섹션 자체를 지우고 발행하면 된다.
     [layout-section] 1. 안건1 (첨부1)   <- "(첨부1)"은 "첨부1" 앵커(하단 ui-expand 앞)로 이동하는 링크
                         (이 줄 자체에 "제목1" 앵커가 심어져, 아래에서 되돌아올 수 있음)
                         (본문 자리표시자 3줄)
@@ -136,6 +140,53 @@ def _include_page_macro(page_title: str) -> str:
     )
 
 
+def attachment_page_title(index: int, title: str) -> str:
+    """include 매크로가 참조하는 하위 페이지 제목: "(첨부 N) {안건 제목}" (공백 있음)."""
+    return f"(첨부 {index}) {title}"
+
+
+def create_from_template_button(template_id: str, button_label: str) -> str:
+    """컨플루언스 '템플릿에서 페이지 만들기' 버튼 매크로.
+
+    templateName과 templateId에 같은 값을 넣는다(팀 인스턴스에서 실제로
+    쓰는 방식 - 다른 값이 필요하면 build_agenda_page_body 호출 시
+    template_id를 바꿔서 넘기면 된다).
+    """
+    return (
+        f'<ac:structured-macro ac:name="create-from-template" ac:schema-version="1" '
+        f'ac:macro-id="{_new_macro_id()}">'
+        f'<ac:parameter ac:name="templateName">{html.escape(template_id)}</ac:parameter>'
+        f'<ac:parameter ac:name="templateId">{html.escape(template_id)}</ac:parameter>'
+        f'<ac:parameter ac:name="buttonLabel">{html.escape(button_label)}</ac:parameter>'
+        f"</ac:structured-macro>"
+    )
+
+
+def attachment_setup_section_html(
+    items: Sequence[AgendaItem],
+    template_id: str,
+    button_label: str,
+) -> str:
+    """맨 위 섹션: 하위 페이지 생성 버튼 하나 + 만들어야 할 페이지 제목 목록.
+
+    버튼은 클릭할 때마다 템플릿으로 새 페이지를 하나씩 만드는 용도라 하나만
+    두고, 그 옆에 include 매크로들이 참조하는 제목을 그대로 나열해서 어떤
+    제목으로 몇 개를 만들어야 하는지 보여준다. 하위 페이지를 다 만들고 나면
+    이 섹션 자체를 지우면 된다(보고서 본문에는 필요 없는 준비용 섹션).
+    """
+    button_html = create_from_template_button(template_id, button_label)
+    titles_html = "\n".join(
+        f"<li>{html.escape(attachment_page_title(idx, item.title))}</li>"
+        for idx, item in enumerate(items, start=1)
+    )
+    content = (
+        f"<p>{button_html}</p>"
+        "<p>아래 제목으로 하위 페이지를 하나씩 만드세요(버튼을 누르면 나오는 제목 입력창에 그대로 입력):</p>"
+        f"<ul>\n{titles_html}\n</ul>"
+    )
+    return layout_section(content)
+
+
 def attachment_section_html(index: int, title: str) -> str:
     """'첨부N' 앵커 + ui-expand 매크로(하위 페이지 include + '(돌아가기)' 링크).
 
@@ -144,7 +195,7 @@ def attachment_section_html(index: int, title: str) -> str:
     """
     attachment_anchor = f"첨부{index}"
     title_anchor = f"제목{index}"
-    expand_title = f"(첨부 {index}) {title}"
+    expand_title = attachment_page_title(index, title)
 
     include_html = _include_page_macro(expand_title)
     back_link_html = anchor_link(title_anchor, "(돌아가기)")
@@ -177,15 +228,26 @@ class AgendaItem:
     raw_body: bool = False
 
 
+DEFAULT_ATTACHMENT_TEMPLATE_ID = "3877634148"
+DEFAULT_ATTACHMENT_BUTTON_LABEL = "첨부 페이지 만들기"
+
+
 def build_agenda_page_body(
     items: Sequence[AgendaItem],
     intro: Optional[TextInput] = None,
+    template_id: str = DEFAULT_ATTACHMENT_TEMPLATE_ID,
+    button_label: str = DEFAULT_ATTACHMENT_BUTTON_LABEL,
 ) -> str:
-    """안건 목록을 받아 컨플루언스 에디터에 그대로 붙여넣을 storage-format 소스를 만든다."""
+    """안건 목록을 받아 컨플루언스 에디터에 그대로 붙여넣을 storage-format 소스를 만든다.
+
+    맨 위 섹션에는 include 매크로들이 참조할 하위 페이지를 실제로 만들 때
+    쓰는 "템플릿에서 페이지 만들기" 버튼 + 만들어야 할 제목 목록을 넣는다.
+    하위 페이지를 다 만든 뒤에는 이 섹션만 지우고 발행하면 된다.
+    """
     if not items:
         raise ValueError("최소 1개 이상의 안건이 필요합니다.")
 
-    sections: List[str] = []
+    sections: List[str] = [attachment_setup_section_html(items, template_id, button_label)]
 
     if intro:
         sections.append(layout_section(_paragraphs_html(intro)))
