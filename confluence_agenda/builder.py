@@ -252,9 +252,13 @@ def build_agenda_page_body(
     if intro:
         sections.append(layout_section(_paragraphs_html(intro)))
 
-    # 1) 안건 목록: 안건 하나(제목 + 본문)가 레이아웃 섹션 하나
+    # 1) 안건 목록: 안건 하나(제목 + 본문)가 레이아웃 섹션 하나.
+    # 제목과 본문 사이, 안건 끝에 각각 빈 줄을 한 줄씩 넣어 여백을 준다.
+    blank_line = "<p><br/></p>"
     for idx, item in enumerate(items, start=1):
-        content = heading_html(idx, item.title) + "\n" + _resolve_body_html(item)
+        content = "\n".join(
+            [heading_html(idx, item.title), blank_line, _resolve_body_html(item), blank_line]
+        )
         sections.append(layout_section(content))
 
     # 2) 첨부 ui-expand 목록: 안건별로 나누지 않고 전부 하나의 레이아웃 섹션에 담는다.

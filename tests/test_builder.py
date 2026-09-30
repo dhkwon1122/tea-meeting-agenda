@@ -71,6 +71,24 @@ class BuildAgendaPageBodyTest(unittest.TestCase):
         # 첨부 ui-expand는 이 섹션에는 없다.
         self.assertNotIn("ui-expand", agenda_section)
 
+    def test_agenda_section_has_blank_line_after_heading_and_after_body(self):
+        items = [AgendaItem(title="예산 승인", body="본문 내용")]
+        result = build_agenda_page_body(items)
+        agenda_section = _sections(result)[1]
+
+        heading_end = agenda_section.index("</h3>") + len("</h3>")
+        body_line = "<p>본문 내용</p>"
+        body_start = agenda_section.index(body_line)
+        blank_line = "<p><br/></p>"
+
+        # 제목(h3)과 본문 사이에 빈 줄 하나.
+        between = agenda_section[heading_end:body_start].strip()
+        self.assertEqual(between, blank_line)
+
+        # 본문 뒤(섹션 끝)에도 빈 줄 하나.
+        after_body = agenda_section[body_start + len(body_line):].strip()
+        self.assertEqual(after_body, blank_line)
+
     def test_all_attachments_are_inside_a_single_shared_section(self):
         items = [AgendaItem(title="A"), AgendaItem(title="B"), AgendaItem(title="C")]
         result = build_agenda_page_body(items)
