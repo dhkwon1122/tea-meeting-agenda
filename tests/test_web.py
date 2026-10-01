@@ -43,6 +43,16 @@ class WebAppTest(unittest.TestCase):
         self.assertIn("2. 채용 계획", body)
         self.assertIn("ac:name=&#34;ui-expand&#34;", body)
 
+    def test_post_shows_macro_connection_diagram(self):
+        resp = self.client.post(
+            "/", data={"titles": "예산안 승인\n채용 계획", "action": "generate"}
+        )
+        body = resp.data.decode("utf-8")
+        self.assertIn("매크로 연결 구조", body)
+        self.assertEqual(body.count('class="diagram-item"'), 2)
+        self.assertIn("anchor: 제목1", body)
+        self.assertIn("anchor: 첨부2", body)
+
     def test_no_contacts_file_means_no_preset_chips(self):
         # 실제 워크스테이션에 contacts.json이 있어도 이 테스트가 영향받지
         # 않도록, 존재하지 않는 경로를 명시적으로 가리킨다.

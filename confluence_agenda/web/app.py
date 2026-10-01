@@ -25,6 +25,7 @@ from ..builder import (
 )
 from ..mailer import MailConfigError, is_mail_configured, send_report_email
 from .contacts import load_preset_contacts
+from .diagram import build_macro_diagram_html
 
 app = Flask(__name__)
 
@@ -123,6 +124,36 @@ PAGE_TEMPLATE = """
   .message.error { background: var(--error-bg); color: var(--error-text); }
 
   .output-actions { margin-top: 12px; }
+
+  .diagram-item { margin-bottom: 24px; }
+  .diagram-item:last-child { margin-bottom: 0; }
+  .diagram-item-label {
+    font-size: 0.75rem; font-weight: 600; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: .04em; margin-bottom: 8px;
+  }
+  .diagram-box { border-radius: 10px; padding: 14px 16px; border: 1.5px solid; }
+  .diagram-box--heading { background: var(--blue-tint); border-color: var(--blue); }
+  .diagram-box--attachment { background: #f1f3f4; border-color: #5f6368; }
+  .diagram-box-title {
+    font-size: 0.72rem; font-weight: 600; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: .03em; margin-bottom: 6px;
+  }
+  .diagram-box-heading-text { font-size: 0.95rem; font-weight: 500; margin-bottom: 8px; }
+  .diagram-badges, .diagram-sub { display: flex; flex-wrap: wrap; gap: 6px; }
+  .diagram-sub { margin-top: 10px; padding-top: 10px; border-top: 1px dashed #c4c7c5; }
+  .diagram-badge {
+    display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 0.75rem;
+    font-family: "SFMono-Regular", Consolas, monospace; word-break: break-word; max-width: 100%;
+  }
+  .diagram-badge--anchor { background: #fef7e0; color: #a35a00; }
+  .diagram-badge--macro { background: #e8f0fe; color: #1a73e8; }
+  .diagram-badge--include { background: #e6f4ea; color: #137333; }
+  .diagram-badge--back { background: #fce8e6; color: #c5221f; }
+  .diagram-arrow {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    margin: 6px 0; color: var(--text-muted); font-size: 0.78rem;
+  }
+  .diagram-arrow-glyph { font-size: 1.1rem; }
 </style>
 </head>
 <body>
@@ -189,6 +220,18 @@ PAGE_TEMPLATE = """
     </div>
   </div>
   {% endif %}
+
+  {% if diagram_html %}
+  <div class="card">
+    <h2>매크로 연결 구조</h2>
+    <p class="subtitle" style="margin-bottom:16px;">
+      안건마다 "① 제목 섹션"이 "(첨부N)" 링크로 "② 첨부 섹션"의 앵커로 이동하고,
+      그 안에서 include로 하위 페이지를 불러온 뒤 "(돌아가기)" 링크로 다시
+      제목 섹션의 앵커로 돌아갑니다.
+    </p>
+    {{ diagram_html | safe }}
+  </div>
+  {% endif %}
 </div>
 
   <script>
@@ -233,6 +276,7 @@ def index():
     extra_to = ""
     subject = default_subject
     output: Optional[str] = None
+    diagram_html: Optional[str] = None
     message: Optional[str] = None
     message_ok = True
 
@@ -249,6 +293,7 @@ def index():
         else:
             items = [AgendaItem(title=title) for title in titles]
             output = build_agenda_page_body(items)
+            diagram_html = build_macro_diagram_html(items)
 
             if action == "send_mail":
                 # dict.fromkeys로 순서를 유지한 채 중복 제거.
@@ -280,6 +325,7 @@ def index():
         extra_to=extra_to,
         subject=subject,
         output=output,
+        diagram_html=diagram_html,
         message=message,
         message_ok=message_ok,
         mail_configured=is_mail_configured(),
