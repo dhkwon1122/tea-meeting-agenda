@@ -116,6 +116,79 @@ class AuthTest(unittest.TestCase):
             self.assertIsNone(auth.authenticate("", "pw"))
             self.assertIsNone(auth.authenticate("user", ""))
 
+    def test_diagnose_login_reports_missing_database_url(self):
+        with mock.patch.dict("os.environ", {}, clear=True):
+            lines = auth.diagnose_login("someone", "pw")
+
+        self.assertTrue(any("DATABASE_URL 환경변수가 비어있습니다" in l for l in lines))
+
+    def test_diagnose_login_reports_missing_table(self):
+        # app_users 테이블 자체가 없는 빈 sqlite DB - "같은 DB가 맞는지" 의심 케이스.
+        db_path = Path(self._tmpdir.name) / "empty.db"
+        create_engine(f"sqlite:///{db_path}").dispose()
+        with mock.patch.dict("os.environ", {"DATABASE_URL": f"sqlite:///{db_path}"}, clear=True):
+            lines = auth.diagnose_login("someone", "pw")
+
+        self.assertTrue(any("DB 연결 성공" in l for l in lines))
+        self.assertTrue(any("app_users 테이블을 읽지 못했습니다" in l for l in lines))
+
+    def test_diagnose_login_reports_unknown_user(self):
+        env = self._sqlite_env([])
+        with mock.patch.dict("os.environ", env, clear=True):
+            lines = auth.diagnose_login("nobody", "pw")
+
+        self.assertTrue(any("app_users 테이블 확인됨" in l for l in lines))
+        self.assertTrue(any("계정을 app_users 테이블에서 찾지 못했습니다" in l for l in lines))
+
+    def test_diagnose_login_reports_wrong_password(self):
+        env = self._sqlite_env(
+            [
+                {
+                    "user_id": "dh.kwon",
+                    "password_hash": generate_password_hash("correct horse"),
+                    "display_name": "권동혁",
+                    "must_change_password": False,
+                }
+            ]
+        )
+        with mock.patch.dict("os.environ", env, clear=True):
+            lines = auth.diagnose_login("dh.kwon", "wrong")
+
+        self.assertTrue(any("계정 찾음" in l for l in lines))
+        self.assertTrue(any("비밀번호가 일치하지 않습니다" in l for l in lines))
+
+    def test_diagnose_login_reports_must_change_password(self):
+        env = self._sqlite_env(
+            [
+                {
+                    "user_id": "newbie",
+                    "password_hash": generate_password_hash("12345678"),
+                    "display_name": "신규",
+                    "must_change_password": True,
+                }
+            ]
+        )
+        with mock.patch.dict("os.environ", env, clear=True):
+            lines = auth.diagnose_login("newbie", "12345678")
+
+        self.assertTrue(any("must_change_password=True" in l for l in lines))
+
+    def test_diagnose_login_reports_full_success(self):
+        env = self._sqlite_env(
+            [
+                {
+                    "user_id": "dh.kwon",
+                    "password_hash": generate_password_hash("correct horse"),
+                    "display_name": "권동혁",
+                    "must_change_password": False,
+                }
+            ]
+        )
+        with mock.patch.dict("os.environ", env, clear=True):
+            lines = auth.diagnose_login("dh.kwon", "correct horse")
+
+        self.assertTrue(any("로그인 성공 조건을 모두 만족합니다" in l for l in lines))
+
     def test_session_roundtrip(self):
         app = Flask(__name__)
         app.secret_key = "test-secret"

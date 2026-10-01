@@ -96,6 +96,84 @@ def authenticate(user_id: str, password: str) -> Optional[dict]:
     }
 
 
+def diagnose_login(user_id: str, password: str) -> list[str]:
+    """authenticate()와 같은 경로를 단계별로 밟으며, 어디서 막히는지 사람이
+    읽을 수 있는 메시지 목록으로 돌려준다.
+
+    로그인 화면은 보안상 실패 사유를 전부 "아이디 또는 비밀번호가 올바르지
+    않습니다"로 뭉뚱그리므로(DB 연결 실패인지, 계정이 없는지, 비밀번호가
+    틀린 것인지 화면만으로는 구분이 안 된다), 운영자가 직접 원인을 추적할
+    때는 이 함수를 쓴다 - `python -m confluence_agenda.web.auth_check` 참고.
+    """
+    lines: list[str] = []
+
+    url = os.environ.get("DATABASE_URL", "").strip()
+    if not url:
+        lines.append("✗ DATABASE_URL 환경변수가 비어있습니다.")
+        return lines
+    lines.append(f"✓ DATABASE_URL 설정됨 (끝부분: ...{url[-24:]})")
+
+    engine = get_engine()
+    if engine is None:
+        lines.append(
+            "✗ SQLAlchemy Engine 생성 실패 "
+            "(URL 형식이 잘못됐거나 sqlalchemy/psycopg2가 설치되지 않았습니다)."
+        )
+        return lines
+    lines.append("✓ Engine 생성 성공")
+
+    from sqlalchemy import select, text
+
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception as exc:
+        lines.append(f"✗ DB 연결 실패: {exc}")
+        lines.append(
+            "  → 호스트/포트가 이 앱의 실행 환경에서 실제로 닿는지 확인하세요. "
+            "docker-compose의 서비스명(예: db)은 같은 compose 네트워크 안에서만 "
+            "풀리므로, Researcher-board와 다른 compose 프로젝트로 띄웠다면 "
+            "localhost/127.0.0.1이나 호스트의 실제 IP로 바꿔야 할 수 있습니다."
+        )
+        return lines
+    lines.append("✓ DB 연결 성공 (SELECT 1 통과)")
+
+    table = _users_table()
+    if table is None:
+        lines.append("✗ app_users 테이블을 읽지 못했습니다 (이 DB에 없거나 권한이 부족합니다).")
+        lines.append("  → DATABASE_URL이 Researcher-board와 정말 같은 데이터베이스를 가리키는지 확인하세요.")
+        return lines
+    lines.append("✓ app_users 테이블 확인됨 (컬럼: " + ", ".join(c.name for c in table.columns) + ")")
+
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(select(table).where(table.c.user_id == user_id)).mappings().first()
+    except Exception as exc:
+        lines.append(f"✗ 계정 조회 실패: {exc}")
+        return lines
+
+    if row is None:
+        lines.append(f"✗ user_id='{user_id}' 계정을 app_users 테이블에서 찾지 못했습니다.")
+        lines.append("  → 대소문자/오타를 확인하고, Researcher-board 쪽 계정 목록과 비교해보세요.")
+        return lines
+    lines.append(f"✓ 계정 찾음 (display_name={row.get('display_name')!r})")
+
+    if not check_password_hash(row["password_hash"], password):
+        lines.append("✗ 비밀번호가 일치하지 않습니다.")
+        return lines
+    lines.append("✓ 비밀번호 일치")
+
+    if row.get("must_change_password"):
+        lines.append(
+            "△ must_change_password=True → 이 앱은 임시 비밀번호 계정의 로그인을 거부합니다. "
+            "Researcher-board에서 먼저 비밀번호를 바꿔야 합니다."
+        )
+        return lines
+
+    lines.append("✓ 로그인 성공 조건을 모두 만족합니다.")
+    return lines
+
+
 def get_current_user() -> Optional[dict]:
     if "user_id" not in flask.session:
         return None

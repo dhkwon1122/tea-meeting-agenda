@@ -34,15 +34,15 @@ app = Flask(__name__)
 # DATABASE_URL이 설정돼 있으면(= Researcher-board와 같은 app_users 테이블에
 # 접근 가능하면) 로그인을 요구한다. 세션 쿠키 서명을 위해 SESSION_SECRET이
 # 반드시 있어야 한다 - 없으면 재시작마다 세션이 전부 끊기거나(무작위 키),
-# 공격자가 세션을 위조할 수 있는 약한 키를 쓰게 되므로 아예 기동을 막는다.
+# 공격자가 세션을 위조할 수 있는 약한 키를 쓰게 되므로 서버 기동 시(main())
+# 확실히 막는다. 여기서는 값이 있으면 반영만 하고, 없다고 예외를 던지지는
+# 않는다 - 이 모듈은 `import confluence_agenda.web.<아무거나>`만 해도 함께
+# 로드되므로(패키지 __init__.py가 .app을 가져옴), 여기서 예외를 던지면
+# auth_check.py 같은 진단 스크립트조차 실행 전에 막혀버린다.
 if auth.is_configured():
     _session_secret = os.environ.get("SESSION_SECRET", "").strip()
-    if not _session_secret:
-        raise RuntimeError(
-            "DATABASE_URL이 설정되어 로그인이 필요한데 SESSION_SECRET이 없습니다. "
-            ".env.example을 참고해 설정해주세요."
-        )
-    app.secret_key = _session_secret
+    if _session_secret:
+        app.secret_key = _session_secret
 
 _LOGIN_EXEMPT_PATHS = {"/login", "/auth/login", "/logout"}
 
@@ -475,6 +475,11 @@ def logout():
 
 
 def main() -> None:
+    if auth.is_configured() and not app.secret_key:
+        raise RuntimeError(
+            "DATABASE_URL이 설정되어 로그인이 필요한데 SESSION_SECRET이 없습니다. "
+            ".env.example을 참고해 설정해주세요."
+        )
     port = int(os.environ.get("PORT", "10001"))
     app.run(host="0.0.0.0", port=port)
 

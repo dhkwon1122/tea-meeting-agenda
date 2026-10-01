@@ -6,7 +6,7 @@ from unittest import mock
 
 from confluence_agenda.builder import build_email_subject
 from confluence_agenda.web import auth
-from confluence_agenda.web.app import app
+from confluence_agenda.web.app import app, main
 
 _TEST_CONTACTS = [
     {"name": "테스트유저1", "email": "user1@example.com"},
@@ -257,6 +257,31 @@ class LoginFlowTest(unittest.TestCase):
         fake_clear.assert_called_once()
         self.assertEqual(resp.status_code, 302)
         self.assertEqual(resp.headers["Location"], "/login")
+
+
+class MainStartupGuardTest(unittest.TestCase):
+    """importing confluence_agenda.web.* (진단 스크립트 등)은 SESSION_SECRET이
+    없어도 절대 실패하면 안 되고, 실제 서버 기동(main())에서만 막혀야 한다."""
+
+    def setUp(self):
+        self._orig_secret_key = app.secret_key
+
+    def tearDown(self):
+        app.secret_key = self._orig_secret_key
+
+    def test_main_raises_when_db_configured_without_session_secret(self):
+        app.secret_key = None
+        with mock.patch.object(auth, "is_configured", return_value=True):
+            with self.assertRaisesRegex(RuntimeError, "SESSION_SECRET"):
+                main()
+
+    def test_main_does_not_raise_when_secret_key_already_set(self):
+        app.secret_key = "already-set"
+        with mock.patch.object(auth, "is_configured", return_value=True), mock.patch.object(
+            app, "run"
+        ) as fake_run:
+            main()
+        fake_run.assert_called_once()
 
 
 if __name__ == "__main__":
