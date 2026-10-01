@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import os
 from typing import List, Optional
+from urllib.parse import quote
 
-from flask import Flask, render_template_string, request
+from flask import Flask, redirect, render_template_string, request
 
 from ..builder import (
     AgendaItem,
@@ -24,10 +25,38 @@ from ..builder import (
     build_email_subject,
 )
 from ..mailer import MailConfigError, is_mail_configured, send_report_email
+from . import auth
 from .contacts import load_preset_contacts
 from .diagram import build_macro_diagram_html
 
 app = Flask(__name__)
+
+# DATABASE_URL이 설정돼 있으면(= Researcher-board와 같은 app_users 테이블에
+# 접근 가능하면) 로그인을 요구한다. 세션 쿠키 서명을 위해 SESSION_SECRET이
+# 반드시 있어야 한다 - 없으면 재시작마다 세션이 전부 끊기거나(무작위 키),
+# 공격자가 세션을 위조할 수 있는 약한 키를 쓰게 되므로 아예 기동을 막는다.
+if auth.is_configured():
+    _session_secret = os.environ.get("SESSION_SECRET", "").strip()
+    if not _session_secret:
+        raise RuntimeError(
+            "DATABASE_URL이 설정되어 로그인이 필요한데 SESSION_SECRET이 없습니다. "
+            ".env.example을 참고해 설정해주세요."
+        )
+    app.secret_key = _session_secret
+
+_LOGIN_EXEMPT_PATHS = {"/login", "/auth/login", "/logout"}
+
+
+@app.before_request
+def _require_login():
+    if not auth.is_configured():
+        return None
+    if request.path in _LOGIN_EXEMPT_PATHS:
+        return None
+    if auth.get_current_user() is None:
+        next_url = request.full_path if request.query_string else request.path
+        return redirect(f"/login?next={quote(next_url)}")
+    return None
 
 PAGE_TEMPLATE = """
 <!doctype html>
@@ -154,13 +183,25 @@ PAGE_TEMPLATE = """
     margin: 6px 0; color: var(--text-muted); font-size: 0.78rem;
   }
   .diagram-arrow-glyph { font-size: 1.1rem; }
+
+  .header-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+  .user-info { font-size: 0.85rem; color: var(--text-muted); white-space: nowrap; }
+  .user-info a { color: var(--blue); text-decoration: none; margin-left: 10px; }
+  .user-info a:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
 <div class="page">
   <header>
-    <h1>Confluence 안건 보고 소스 생성기</h1>
-    <p class="subtitle">안건 제목을 한 줄에 하나씩 입력하세요 (대략 10개 내외 권장).</p>
+    <div class="header-row">
+      <div>
+        <h1>Confluence 안건 보고 소스 생성기</h1>
+        <p class="subtitle">안건 제목을 한 줄에 하나씩 입력하세요 (대략 10개 내외 권장).</p>
+      </div>
+      {% if current_user %}
+      <div class="user-info">{{ current_user.display_name }}님<a href="/logout">로그아웃</a></div>
+      {% endif %}
+    </div>
   </header>
 
   {% if message %}
@@ -329,7 +370,108 @@ def index():
         message=message,
         message_ok=message_ok,
         mail_configured=is_mail_configured(),
+        current_user=auth.get_current_user(),
     )
+
+
+LOGIN_PAGE_TEMPLATE = """
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>로그인 - Confluence 안건 보고 소스 생성기</title>
+<style>
+  :root { --blue: #1a73e8; --blue-dark: #1765cc; --text: #202124; --text-muted: #5f6368;
+          --border: #dadce0; --surface: #ffffff; --bg: #f8f9fa; --error-bg: #fce8e6; --error-text: #c5221f; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Google Sans", Roboto, -apple-system, BlinkMacSystemFont, "Segoe UI",
+                 "Malgun Gothic", Arial, sans-serif;
+    background: var(--bg); color: var(--text); margin: 0;
+    min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px;
+  }
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 32px; width: 100%; max-width: 360px;
+  }
+  h1 { font-size: 1.2rem; font-weight: 500; margin: 0 0 4px; }
+  .subtitle { color: var(--text-muted); font-size: 0.85rem; margin: 0 0 24px; }
+  .field { margin-bottom: 16px; }
+  .field label { display: block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 6px; }
+  input[type=text], input[type=password] {
+    width: 100%; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
+    font-size: 0.9rem; font-family: inherit;
+  }
+  input[type=text]:focus, input[type=password]:focus {
+    outline: none; border-color: var(--blue); box-shadow: 0 0 0 1px var(--blue);
+  }
+  button {
+    width: 100%; font-family: inherit; font-size: 0.9rem; font-weight: 500; border-radius: 20px;
+    padding: 10px 22px; cursor: pointer; border: none; background: var(--blue); color: #fff;
+    margin-top: 8px;
+  }
+  button:hover { background: var(--blue-dark); }
+  .message { padding: 10px 14px; border-radius: 8px; margin-bottom: 18px; font-size: 0.85rem;
+             background: var(--error-bg); color: var(--error-text); }
+</style>
+</head>
+<body>
+  <form class="card" method="post" action="/auth/login">
+    <h1>로그인</h1>
+    <p class="subtitle">Researcher-board 계정으로 로그인하세요.</p>
+    {% if error %}<div class="message">{{ error }}</div>{% endif %}
+    <input type="hidden" name="next" value="{{ next_url }}">
+    <div class="field">
+      <label for="user_id">아이디</label>
+      <input type="text" id="user_id" name="user_id" autofocus required>
+    </div>
+    <div class="field">
+      <label for="password">비밀번호</label>
+      <input type="password" id="password" name="password" required>
+    </div>
+    <button type="submit">로그인</button>
+  </form>
+</body>
+</html>
+"""
+
+_LOGIN_ERROR_MESSAGES = {
+    "invalid": "아이디 또는 비밀번호가 올바르지 않습니다.",
+    "must_change_password": "임시 비밀번호 상태입니다. Researcher-board에서 먼저 비밀번호를 변경해주세요.",
+}
+
+
+@app.route("/login", methods=["GET"])
+def login_page():
+    next_url = request.args.get("next") or "/"
+    error_code = request.args.get("error")
+    error = _LOGIN_ERROR_MESSAGES.get(error_code) if error_code else None
+    return render_template_string(LOGIN_PAGE_TEMPLATE, next_url=next_url, error=error)
+
+
+@app.route("/auth/login", methods=["POST"])
+def auth_login():
+    user_id = request.form.get("user_id", "").strip()
+    password = request.form.get("password", "")
+    next_url = request.form.get("next") or "/"
+
+    try:
+        user = auth.authenticate(user_id, password)
+    except auth.PasswordChangeRequired:
+        return redirect(f"/login?error=must_change_password&next={quote(next_url)}")
+
+    if user is None:
+        return redirect(f"/login?error=invalid&next={quote(next_url)}")
+
+    auth.set_session(user)
+    return redirect(next_url)
+
+
+@app.route("/logout")
+def logout():
+    auth.clear_session()
+    return redirect("/login")
 
 
 def main() -> None:

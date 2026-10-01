@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest import mock
 
 from confluence_agenda.builder import build_email_subject
+from confluence_agenda.web import auth
 from confluence_agenda.web.app import app
 
 _TEST_CONTACTS = [
@@ -181,6 +182,81 @@ class WebAppTest(unittest.TestCase):
         self.assertIn(
             "메일을 보냈습니다: 테스트유저1, 테스트유저2, other@example.com".encode(), resp.data
         )
+
+
+class LoginFlowTest(unittest.TestCase):
+    """auth.is_configured()가 True일 때(= DATABASE_URL로 로그인이 켜졌을 때)
+    before_request 보호/로그인/로그아웃 흐름을 확인한다. 실제 DB는 쓰지 않고
+    confluence_agenda.web.auth의 함수를 직접 모킹한다(DB 자체 동작은
+    test_auth.py에서 sqlite로 이미 검증)."""
+
+    def setUp(self):
+        app.testing = True
+        app.secret_key = "test-secret"
+        self.client = app.test_client()
+
+    def test_root_redirects_to_login_when_not_authenticated(self):
+        with mock.patch.object(auth, "is_configured", return_value=True), mock.patch.object(
+            auth, "get_current_user", return_value=None
+        ):
+            resp = self.client.get("/", follow_redirects=False)
+
+        self.assertEqual(resp.status_code, 302)
+        self.assertTrue(resp.headers["Location"].startswith("/login"))
+
+    def test_root_accessible_when_authenticated(self):
+        with mock.patch.object(auth, "is_configured", return_value=True), mock.patch.object(
+            auth, "get_current_user", return_value={"user_id": "dh.kwon", "display_name": "권동혁"}
+        ):
+            resp = self.client.get("/")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("권동혁님".encode(), resp.data)
+
+    def test_login_page_shows_invalid_credentials_error(self):
+        resp = self.client.get("/login?error=invalid")
+        self.assertIn("아이디 또는 비밀번호가 올바르지 않습니다".encode(), resp.data)
+
+    def test_auth_login_success_sets_session_and_redirects_to_next(self):
+        with mock.patch.object(
+            auth, "authenticate", return_value={"user_id": "dh.kwon", "display_name": "권동혁"}
+        ) as fake_auth, mock.patch.object(auth, "set_session") as fake_set_session:
+            resp = self.client.post(
+                "/auth/login",
+                data={"user_id": "dh.kwon", "password": "pw", "next": "/"},
+                follow_redirects=False,
+            )
+
+        fake_auth.assert_called_once_with("dh.kwon", "pw")
+        fake_set_session.assert_called_once_with({"user_id": "dh.kwon", "display_name": "권동혁"})
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp.headers["Location"], "/")
+
+    def test_auth_login_invalid_credentials_redirects_with_error(self):
+        with mock.patch.object(auth, "authenticate", return_value=None):
+            resp = self.client.post(
+                "/auth/login", data={"user_id": "dh.kwon", "password": "wrong"}, follow_redirects=False
+            )
+
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("error=invalid", resp.headers["Location"])
+
+    def test_auth_login_must_change_password_redirects_with_specific_error(self):
+        with mock.patch.object(auth, "authenticate", side_effect=auth.PasswordChangeRequired()):
+            resp = self.client.post(
+                "/auth/login", data={"user_id": "newbie", "password": "12345678"}, follow_redirects=False
+            )
+
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("error=must_change_password", resp.headers["Location"])
+
+    def test_logout_clears_session_and_redirects_to_login(self):
+        with mock.patch.object(auth, "clear_session") as fake_clear:
+            resp = self.client.get("/logout", follow_redirects=False)
+
+        fake_clear.assert_called_once()
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp.headers["Location"], "/login")
 
 
 if __name__ == "__main__":

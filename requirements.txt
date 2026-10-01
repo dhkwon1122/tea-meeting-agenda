@@ -1,2 +1,8 @@
 requests>=2,<3
 flask>=3,<4
+
+# 로그인(선택) - DATABASE_URL을 설정해 Researcher-board와 같은 사용자 DB를
+# 쓸 때만 필요. DATABASE_URL을 안 쓰면 이 두 패키지가 없어도 앱은 그대로
+# 동작한다(confluence_agenda/web/db.py가 import 실패를 흡수함).
+sqlalchemy>=2,<3
+psycopg2-binary>=2,<3
