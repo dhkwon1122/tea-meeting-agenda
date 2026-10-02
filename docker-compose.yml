@@ -30,6 +30,14 @@ services:
     env_file: *env-file
     ports:
       - "10001:10001"
+    # DATABASE_URL로 로그인(Researcher-board와 같은 DB)을 쓸 때, 호스트에
+    # 떠 있는 Postgres를 가리키려면 DATABASE_URL의 호스트를 "localhost"가
+    # 아니라 "host.docker.internal"로 써야 한다(컨테이너 안에서 localhost는
+    # 컨테이너 자기 자신이라 "connection refused"가 난다). Mac/Windows Docker
+    # Desktop은 이 이름이 기본으로 풀리지만, Linux Docker는 아래 extra_hosts가
+    # 있어야 풀린다 - 있어도 Mac/Windows에서는 무해하니 항상 켜둔다.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   cli:
     build: *build
@@ -38,3 +46,5 @@ services:
     command: ["python", "-m", "confluence_agenda.cli"]
     stdin_open: true
     tty: true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

@@ -130,10 +130,12 @@ def diagnose_login(user_id: str, password: str) -> list[str]:
     except Exception as exc:
         lines.append(f"✗ DB 연결 실패: {exc}")
         lines.append(
-            "  → 호스트/포트가 이 앱의 실행 환경에서 실제로 닿는지 확인하세요. "
-            "docker-compose의 서비스명(예: db)은 같은 compose 네트워크 안에서만 "
-            "풀리므로, Researcher-board와 다른 compose 프로젝트로 띄웠다면 "
-            "localhost/127.0.0.1이나 호스트의 실제 IP로 바꿔야 할 수 있습니다."
+            "  → 이 앱을 Docker 컨테이너 안에서 실행 중이라면, DATABASE_URL 호스트가 "
+            "'localhost'나 '127.0.0.1'이면 안 됩니다 - 컨테이너 안에서는 그게 그 "
+            "컨테이너 자기 자신을 가리켜서 항상 이 오류가 납니다. 'host.docker.internal'로 "
+            "바꾸거나(워크스테이션에 떠 있는 Postgres), Researcher-board와 같은 Docker "
+            "네트워크에 묶고 서비스명(예: db)을 쓰세요. .env.example의 DATABASE_URL "
+            "설명을 참고하세요."
         )
         return lines
     lines.append("✓ DB 연결 성공 (SELECT 1 통과)")
