@@ -222,6 +222,15 @@ class BuildEmailSubjectTest(unittest.TestCase):
 
 
 class ParseAgendaInputTest(unittest.TestCase):
+    def test_browser_textarea_crlf_blank_lines_are_recognized(self):
+        # 브라우저 <textarea> 폼 전송은 줄바꿈을 "\r\n"으로 보낸다 - 빈 줄도
+        # "\r\n\r\n"이 되므로, "\n" 전용으로만 빈 줄을 찾으면 안건이 전부
+        # 하나로 합쳐지는 회귀가 생긴다(실사용에서 실제로 발견된 버그).
+        items = parse_agenda_input("예산안 승인\r\n\r\n채용 계획\r\n\r\n분기 회고")
+
+        self.assertEqual([i.title for i in items], ["예산안 승인", "채용 계획", "분기 회고"])
+        self.assertEqual([i.body for i in items], [[], [], []])
+
     def test_title_only_lines_separated_by_blank_lines(self):
         items = parse_agenda_input("예산안 승인\n\n채용 계획\n\n분기 회고")
 

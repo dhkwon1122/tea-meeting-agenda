@@ -247,8 +247,13 @@ def parse_agenda_input(raw: str) -> List[AgendaItem]:
 
         채용 계획
     """
+    # 브라우저 <textarea>는 폼 전송 시 줄바꿈을 "\r\n"으로 보낸다(HTML
+    # 스펙) - 그대로 두면 빈 줄이 "\r\n\r\n"이 되어 아래 정규식의 "\n"
+    # 전용 패턴과 안 맞아 빈 줄을 전혀 못 찾고 안건이 전부 하나로 합쳐진다.
+    # "\r\n"과 옛 맥 줄바꿈 "\r"을 먼저 "\n"으로 통일한다.
+    normalized = raw.replace("\r\n", "\n").replace("\r", "\n")
     items: List[AgendaItem] = []
-    for block in _BLANK_LINE_RE.split(raw.strip()):
+    for block in _BLANK_LINE_RE.split(normalized.strip()):
         lines = block.splitlines()
         while lines and not lines[0].strip():
             lines.pop(0)
