@@ -34,9 +34,9 @@ class WebAppTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn("안건 제목을 한 줄에 하나씩 입력해주세요".encode(), resp.data)
 
-    def test_post_generates_source_for_multiple_newline_separated_titles(self):
+    def test_post_generates_source_for_multiple_blank_line_separated_titles(self):
         resp = self.client.post(
-            "/", data={"titles": "예산안 승인\n채용 계획\n", "action": "generate"}
+            "/", data={"titles": "예산안 승인\n\n채용 계획\n", "action": "generate"}
         )
         self.assertEqual(resp.status_code, 200)
         body = resp.data.decode("utf-8")
@@ -44,9 +44,24 @@ class WebAppTest(unittest.TestCase):
         self.assertIn("2. 채용 계획", body)
         self.assertIn("ac:name=&#34;ui-expand&#34;", body)
 
+    def test_post_includes_already_written_body_instead_of_placeholder(self):
+        # 예산안 승인은 본문을 이미 써서 붙여넣었고, 채용 계획은 본문 없이
+        # 제목만 입력했다 - 전자는 그 내용이 그대로 들어가고, 후자만 여전히
+        # 자리표시자로 채워져야 한다.
+        resp = self.client.post(
+            "/",
+            data={
+                "titles": "예산안 승인\n부서별 예산안을 검토하고 승인합니다.\n\n채용 계획",
+                "action": "generate",
+            },
+        )
+        body = resp.data.decode("utf-8")
+        self.assertIn("부서별 예산안을 검토하고 승인합니다.", body)
+        self.assertEqual(body.count("가나다라마바사"), 3)
+
     def test_post_shows_macro_connection_diagram(self):
         resp = self.client.post(
-            "/", data={"titles": "예산안 승인\n채용 계획", "action": "generate"}
+            "/", data={"titles": "예산안 승인\n\n채용 계획", "action": "generate"}
         )
         body = resp.data.decode("utf-8")
         self.assertIn("매크로 연결 구조", body)
@@ -110,7 +125,7 @@ class WebAppTest(unittest.TestCase):
             resp = self.client.post(
                 "/",
                 data={
-                    "titles": "예산안 승인\n채용 계획",
+                    "titles": "예산안 승인\n\n채용 계획",
                     "action": "send_mail",
                     "extra_to": "someone@example.com",
                 },

@@ -2,7 +2,8 @@
 Confluence 에디터의 '마크업 삽입'에 그대로 붙여넣을 storage-format 소스를 출력하고,
 필요하면 사내 메일 API로 안건 요약도 함께 보낸다.
 
-본문은 자리표시자 3줄로 자동 채워지고, 첨부 내용은 "(첨부 N) {안건 제목}" 이라는
+본문을 입력하지 않으면 자리표시자 3줄로 자동 채워지고, 입력하면 그 내용이
+그대로 반영된다. 첨부 내용은 "(첨부 N) {안건 제목}" 이라는
 이름의 하위 페이지를 include 매크로로 자동 포함하므로 별도 입력이 필요 없다.
 (해당 하위 페이지는 미리 만들어져 있어야 한다.)
 
@@ -24,6 +25,16 @@ from .builder import AgendaItem, build_agenda_email_html, build_agenda_page_body
 from .mailer import MailConfigError, is_mail_configured, send_report_email
 
 
+def _read_body_lines() -> List[str]:
+    lines: List[str] = []
+    while True:
+        line = input()
+        if line == "":
+            break
+        lines.append(line)
+    return lines
+
+
 def prompt_items() -> List[AgendaItem]:
     while True:
         raw = input("안건 개수(N)를 입력하세요: ").strip()
@@ -35,7 +46,12 @@ def prompt_items() -> List[AgendaItem]:
     items: List[AgendaItem] = []
     for i in range(1, n + 1):
         title = input(f"안건 {i} 제목: ").strip()
-        items.append(AgendaItem(title=title))
+        print(
+            f"안건 {i} 본문 (이미 작성해둔 내용이 있으면 입력, 없으면 바로 Enter "
+            "— 여러 줄 입력 후 빈 줄로 종료):"
+        )
+        body = _read_body_lines()
+        items.append(AgendaItem(title=title, body=body))
     return items
 
 

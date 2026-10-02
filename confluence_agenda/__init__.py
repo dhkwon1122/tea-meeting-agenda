@@ -11,6 +11,7 @@ from .builder import (
     create_from_template_button,
     heading_html,
     layout_section,
+    parse_agenda_input,
 )
 from .mailer import MailConfigError, is_mail_configured, send_report_email
 
@@ -27,6 +28,7 @@ __all__ = [
     "attachment_setup_section_html",
     "create_from_template_button",
     "layout_section",
+    "parse_agenda_input",
     "is_mail_configured",
     "send_report_email",
     "MailConfigError",

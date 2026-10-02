@@ -34,6 +34,7 @@ ac:layout-section이라 Confluence에서 시각적으로 구분되고, 첨부 ui
 from __future__ import annotations
 
 import html
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import date
@@ -226,6 +227,40 @@ class AgendaItem:
     title: str
     body: TextInput = ""
     raw_body: bool = False
+
+
+_BLANK_LINE_RE = re.compile(r"\n[ \t]*\n+")
+
+
+def parse_agenda_input(raw: str) -> List[AgendaItem]:
+    """빈 줄로 안건을 구분하는 자유 입력 텍스트를 AgendaItem 목록으로 바꾼다.
+
+    각 안건 블록의 첫 줄이 제목, 그 아래 줄들(있으면)이 본문이 된다. 본문을
+    안 쓰면 기존처럼 자리표시자 3줄이 채워지고(AgendaItem.body 기본 동작),
+    이미 본문을 다 써둔 안건을 그대로 다시 붙여넣으면 그 본문이 그대로
+    반영된다 - 안건 제목만 한 줄씩 쓰는 기존 방식도 그대로 지원한다(그 경우
+    각 줄 사이에 빈 줄이 있어야 서로 다른 안건으로 구분된다).
+
+    예)
+        예산안 승인
+        부서별 예산안을 검토하고 승인합니다.
+
+        채용 계획
+    """
+    items: List[AgendaItem] = []
+    for block in _BLANK_LINE_RE.split(raw.strip()):
+        lines = block.splitlines()
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        while lines and not lines[-1].strip():
+            lines.pop()
+        if not lines:
+            continue
+        title = lines[0].strip()
+        if not title:
+            continue
+        items.append(AgendaItem(title=title, body=lines[1:]))
+    return items
 
 
 DEFAULT_ATTACHMENT_TEMPLATE_ID = "3877634148"

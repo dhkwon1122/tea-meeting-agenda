@@ -19,10 +19,10 @@ from urllib.parse import quote
 from flask import Flask, redirect, render_template_string, request
 
 from ..builder import (
-    AgendaItem,
     build_agenda_email_html,
     build_agenda_page_body,
     build_email_subject,
+    parse_agenda_input,
 )
 from ..mailer import MailConfigError, is_mail_configured, send_report_email
 from . import auth
@@ -118,7 +118,7 @@ PAGE_TEMPLATE = """
   textarea:focus, input[type=text]:focus {
     outline: none; border-color: var(--blue); box-shadow: 0 0 0 1px var(--blue);
   }
-  #titles { height: 180px; resize: vertical; }
+  #titles { height: 260px; resize: vertical; }
   #output {
     height: 300px; resize: vertical; font-family: "SFMono-Regular", Consolas, monospace;
     font-size: 0.8rem; background: var(--bg); color: var(--text-muted);
@@ -196,7 +196,11 @@ PAGE_TEMPLATE = """
     <div class="header-row">
       <div>
         <h1>Confluence 안건 보고 소스 생성기</h1>
-        <p class="subtitle">안건 제목을 한 줄에 하나씩 입력하세요 (대략 10개 내외 권장).</p>
+        <p class="subtitle">
+          안건 제목을 한 줄씩 입력하세요(대략 10개 내외 권장). 이미 써둔 본문이
+          있으면 제목 아래 줄에 이어서 적고, 다음 안건과는 빈 줄로 구분하세요
+          — 본문을 안 쓴 안건은 기존처럼 자리표시자로 채워집니다.
+        </p>
       </div>
       {% if current_user %}
       <div class="user-info">{{ current_user.display_name }}님<a href="/logout">로그아웃</a></div>
@@ -213,7 +217,7 @@ PAGE_TEMPLATE = """
       <h2>안건</h2>
       <div class="field">
         <textarea id="titles" name="titles"
-                  placeholder="예산안 승인&#10;채용 계획&#10;...">{{ titles_text }}</textarea>
+                  placeholder="예산안 승인&#10;부서별 예산안을 검토하고 승인합니다.&#10;&#10;채용 계획">{{ titles_text }}</textarea>
       </div>
     </div>
 
@@ -289,10 +293,6 @@ PAGE_TEMPLATE = """
 """
 
 
-def _parse_titles(raw: str) -> List[str]:
-    return [line.strip() for line in raw.splitlines() if line.strip()]
-
-
 def _parse_extra_emails(raw: str) -> List[str]:
     # 콤마와 줄바꿈 둘 다 구분자로 허용한다.
     return [part.strip() for chunk in raw.splitlines() for part in chunk.split(",") if part.strip()]
@@ -328,11 +328,10 @@ def index():
         subject = request.form.get("subject", "").strip() or default_subject
         action = request.form.get("action")
 
-        titles = _parse_titles(titles_text)
-        if not titles:
+        items = parse_agenda_input(titles_text)
+        if not items:
             message, message_ok = "안건 제목을 한 줄에 하나씩 입력해주세요.", False
         else:
-            items = [AgendaItem(title=title) for title in titles]
             output = build_agenda_page_body(items)
             diagram_html = build_macro_diagram_html(items)
 

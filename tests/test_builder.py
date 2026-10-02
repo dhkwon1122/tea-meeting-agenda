@@ -7,6 +7,7 @@ from confluence_agenda.builder import (
     build_agenda_email_html,
     build_agenda_page_body,
     build_email_subject,
+    parse_agenda_input,
 )
 
 _SECTION_RE = re.compile(
@@ -218,6 +219,44 @@ class BuildEmailSubjectTest(unittest.TestCase):
 
     def test_defaults_to_today_when_no_date_given(self):
         self.assertEqual(build_email_subject(), build_email_subject(on=date.today()))
+
+
+class ParseAgendaInputTest(unittest.TestCase):
+    def test_title_only_lines_separated_by_blank_lines(self):
+        items = parse_agenda_input("예산안 승인\n\n채용 계획\n\n분기 회고")
+
+        self.assertEqual([i.title for i in items], ["예산안 승인", "채용 계획", "분기 회고"])
+        self.assertEqual([i.body for i in items], [[], [], []])
+
+    def test_lines_after_title_become_body(self):
+        raw = "예산안 승인\n부서별 예산안을 검토하고 승인합니다.\n자세한 내용은 첨부 참고.\n\n채용 계획"
+        items = parse_agenda_input(raw)
+
+        self.assertEqual(items[0].title, "예산안 승인")
+        self.assertEqual(items[0].body, ["부서별 예산안을 검토하고 승인합니다.", "자세한 내용은 첨부 참고."])
+        self.assertEqual(items[1].title, "채용 계획")
+        self.assertEqual(items[1].body, [])
+
+    def test_body_with_only_title_is_empty_falls_back_to_placeholder(self):
+        items = parse_agenda_input("예산안 승인")
+        result = build_agenda_page_body(items)
+
+        self.assertIn("가나다라마바사", result)
+
+    def test_body_already_written_is_used_verbatim_instead_of_placeholder(self):
+        items = parse_agenda_input("예산안 승인\n부서별 예산안을 검토하고 승인합니다.")
+        result = build_agenda_page_body(items)
+
+        self.assertIn("<p>부서별 예산안을 검토하고 승인합니다.</p>", result)
+        self.assertNotIn("가나다라마바사", result)
+
+    def test_extra_blank_lines_and_whitespace_are_tolerated(self):
+        items = parse_agenda_input("\n\n  예산안 승인  \n\n\n  채용 계획\n\n")
+        self.assertEqual([i.title for i in items], ["예산안 승인", "채용 계획"])
+
+    def test_empty_input_returns_no_items(self):
+        self.assertEqual(parse_agenda_input(""), [])
+        self.assertEqual(parse_agenda_input("\n\n   \n\n"), [])
 
 
 if __name__ == "__main__":
