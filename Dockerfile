@@ -48,7 +48,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# ── 1) 사내 CA 인증서 등록 ──
+# ── 1) 사내 CA 인증서 등록 + git(pip가 requirements.txt의 doc2report를
+#       git+https 로 받으려면 필요) ──
 # certs/ 에 아래 중 하나(또는 둘 다)를 둘 수 있다:
 #   (a) 개별 사내 CA:  certs/corp-root-ca.crt  → update-ca-certificates 로 등록
 #   (b) 전체 CA 번들:  certs/ca-bundle.crt     → 시스템 번들을 통째로 교체
@@ -56,7 +57,7 @@ WORKDIR /app
 COPY certs/ /tmp/corp-certs/
 RUN http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY" no_proxy="$NO_PROXY" \
     apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates git \
     && for f in /tmp/corp-certs/*.crt; do \
          [ -e "$f" ] || continue; \
          case "$f" in */ca-bundle.crt) continue ;; esac; \

@@ -12,11 +12,12 @@ CLI(confluence_agenda.cli)와 로직은 동일하고, 입력 방식만 다르다
 
 from __future__ import annotations
 
+import io
 import os
 from typing import List, Optional
 from urllib.parse import quote
 
-from flask import Flask, redirect, render_template_string, request
+from flask import Flask, redirect, render_template_string, request, send_file
 
 from ..builder import (
     build_agenda_email_html,
@@ -28,6 +29,8 @@ from ..mailer import MailConfigError, is_mail_configured, send_report_email
 from . import auth
 from .contacts import load_preset_contacts
 from .diagram import build_macro_diagram_html
+from .docx_export import DocxExportUnavailable, convert_confluence_url_to_docx
+from .docx_export import is_configured as docx_export_configured
 
 app = Flask(__name__)
 
@@ -212,6 +215,21 @@ PAGE_TEMPLATE = """
     <div class="message {{ 'ok' if message_ok else 'error' }}">{{ message }}</div>
   {% endif %}
 
+  {% if docx_export_configured %}
+  <div class="card">
+    <h2>컨플루언스 → Word</h2>
+    {% if docx_error %}<div class="message error">{{ docx_error }}</div>{% endif %}
+    <form method="post" action="/confluence-to-docx">
+      <div class="field">
+        <label for="confluence_url">컨플루언스 페이지 URL</label>
+        <input type="text" id="confluence_url" name="confluence_url"
+               placeholder="https://wiki.사내주소/pages/viewpage.action?pageId=123456">
+      </div>
+      <button class="secondary" type="submit">Word로 변환해서 받기</button>
+    </form>
+  </div>
+  {% endif %}
+
   <form method="post">
     <div class="card">
       <h2>안건</h2>
@@ -370,6 +388,29 @@ def index():
         message_ok=message_ok,
         mail_configured=is_mail_configured(),
         current_user=auth.get_current_user(),
+        docx_export_configured=docx_export_configured(),
+        docx_error=request.args.get("docx_error"),
+    )
+
+
+@app.route("/confluence-to-docx", methods=["POST"])
+def confluence_to_docx():
+    url = request.form.get("confluence_url", "").strip()
+    if not url:
+        return redirect(f"/?docx_error={quote('컨플루언스 페이지 URL을 입력해주세요.')}")
+    try:
+        data, filename = convert_confluence_url_to_docx(url)
+    except DocxExportUnavailable as e:
+        return redirect(f"/?docx_error={quote(str(e))}")
+    except Exception as e:
+        # 페이지를 못 찾음/권한 없음/네트워크 오류 등 doc2report가 던지는 오류.
+        return redirect(f"/?docx_error={quote(f'변환 실패: {e}')}")
+
+    return send_file(
+        io.BytesIO(data),
+        as_attachment=True,
+        download_name=filename,
+        mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
 
 
@@ -480,7 +521,9 @@ def main() -> None:
             ".env.example을 참고해 설정해주세요."
         )
     port = int(os.environ.get("PORT", "10001"))
-    app.run(host="0.0.0.0", port=port)
+    # threaded=True: 컨플루언스 -> Word 변환은 몇 초~몇십 초 걸릴 수 있어서,
+    # 그동안 다른 요청(안건 소스 생성 등)이 막히지 않게 한다.
+    app.run(host="0.0.0.0", port=port, threaded=True)
 
 
 if __name__ == "__main__":

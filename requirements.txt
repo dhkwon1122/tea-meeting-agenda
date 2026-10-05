@@ -6,3 +6,10 @@ flask>=3,<4
 # 동작한다(confluence_agenda/web/db.py가 import 실패를 흡수함).
 sqlalchemy>=2,<3
 psycopg2-binary>=2,<3
+
+# 컨플루언스 문서 → Word 변환(선택) - wcoffee77/document-parsing(doc2report)을
+# 그대로 가져와 쓴다. CONFLUENCE_URL/CONFLUENCE_API_TOKEN을 안 설정하면
+# 이 패키지가 없어도 앱은 그대로 동작한다(confluence_agenda/web/docx_export.py가
+# import 실패를 흡수함). 특정 커밋에 고정 - 업데이트하려면 이 해시를
+# wcoffee77/document-parsing의 최신 커밋으로 바꿀 것.
+doc2report @ git+https://github.com/wcoffee77/document-parsing.git@ce706e5603209a149e6042b5ae296b9cc1d51d53
