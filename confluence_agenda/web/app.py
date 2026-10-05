@@ -26,11 +26,12 @@ from ..builder import (
     parse_agenda_input,
 )
 from ..mailer import MailConfigError, is_mail_configured, send_report_email
-from . import auth
+from . import auth, confluence_credentials
 from .contacts import load_preset_contacts
 from .diagram import build_macro_diagram_html
 from .docx_export import DocxExportUnavailable, convert_confluence_url_to_docx
-from .docx_export import is_configured as docx_export_configured
+from .docx_export import is_feature_available as docx_export_configured
+from .docx_export import resolve_token as resolve_confluence_token
 
 app = Flask(__name__)
 
@@ -219,6 +220,32 @@ PAGE_TEMPLATE = """
   <div class="card">
     <h2>컨플루언스 → Word</h2>
     {% if docx_error %}<div class="message error">{{ docx_error }}</div>{% endif %}
+    {% if docx_message %}<div class="message ok">{{ docx_message }}</div>{% endif %}
+
+    {% if confluence_pat_storage_available %}
+    <div class="field">
+      <label>내 Confluence PAT(개인 액세스 토큰)</label>
+      {% if confluence_pat_registered %}
+        <p class="subtitle" style="margin:0 0 10px;">등록되어 있습니다. 변환에는 이 토큰이 쓰입니다.</p>
+      {% else %}
+        <p class="subtitle" style="margin:0 0 10px;">
+          아직 등록되지 않았습니다 - 등록하지 않으면 관리자가 설정한 공용 토큰(있는 경우)으로 동작합니다.
+        </p>
+      {% endif %}
+      <form method="post" action="/confluence-pat" style="display:flex; gap:8px; margin-bottom:8px;">
+        <input type="text" name="confluence_pat" placeholder="새 PAT 입력"
+               autocomplete="off" style="flex:1;">
+        <button class="secondary" type="submit">{{ '업데이트' if confluence_pat_registered else '등록' }}</button>
+      </form>
+      {% if confluence_pat_registered %}
+      <form method="post" action="/confluence-pat/delete">
+        <button class="secondary" type="submit">내 PAT 삭제</button>
+      </form>
+      {% endif %}
+    </div>
+    <hr style="border:none; border-top:1px solid var(--border); margin:18px 0;">
+    {% endif %}
+
     <form method="post" action="/confluence-to-docx">
       <div class="field">
         <label for="confluence_url">컨플루언스 페이지 URL</label>
@@ -375,6 +402,12 @@ def index():
                     except MailConfigError as e:
                         message, message_ok = f"메일 발송 실패: {e}", False
 
+    current_user = auth.get_current_user()
+    pat_storage_available = confluence_credentials.is_configured()
+    pat_registered = bool(
+        current_user and pat_storage_available and confluence_credentials.status(current_user["user_id"])
+    )
+
     return render_template_string(
         PAGE_TEMPLATE,
         titles_text=titles_text,
@@ -387,9 +420,12 @@ def index():
         message=message,
         message_ok=message_ok,
         mail_configured=is_mail_configured(),
-        current_user=auth.get_current_user(),
+        current_user=current_user,
         docx_export_configured=docx_export_configured(),
         docx_error=request.args.get("docx_error"),
+        docx_message=request.args.get("docx_message"),
+        confluence_pat_storage_available=pat_storage_available,
+        confluence_pat_registered=pat_registered,
     )
 
 
@@ -398,8 +434,16 @@ def confluence_to_docx():
     url = request.form.get("confluence_url", "").strip()
     if not url:
         return redirect(f"/?docx_error={quote('컨플루언스 페이지 URL을 입력해주세요.')}")
+
+    current_user = auth.get_current_user()
+    token = resolve_confluence_token(current_user["user_id"] if current_user else None)
+    if not token:
+        return redirect(
+            f"/?docx_error={quote('Confluence 개인 액세스 토큰(PAT)이 없습니다. 아래에서 내 PAT을 등록해주세요.')}"
+        )
+
     try:
-        data, filename = convert_confluence_url_to_docx(url)
+        data, filename = convert_confluence_url_to_docx(url, token=token)
     except DocxExportUnavailable as e:
         return redirect(f"/?docx_error={quote(str(e))}")
     except Exception as e:
@@ -412,6 +456,34 @@ def confluence_to_docx():
         download_name=filename,
         mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
+
+
+@app.route("/confluence-pat", methods=["POST"])
+def save_confluence_pat():
+    current_user = auth.get_current_user()
+    if current_user is None:
+        return redirect(f"/?docx_error={quote('로그인이 필요합니다.')}")
+
+    pat = request.form.get("confluence_pat", "").strip()
+    if not pat:
+        return redirect(f"/?docx_error={quote('PAT을 입력해주세요.')}")
+
+    try:
+        confluence_credentials.set_pat(current_user["user_id"], pat)
+    except confluence_credentials.CredentialStorageUnavailable as e:
+        return redirect(f"/?docx_error={quote(str(e))}")
+
+    return redirect(f"/?docx_message={quote('내 Confluence PAT을 저장했습니다.')}")
+
+
+@app.route("/confluence-pat/delete", methods=["POST"])
+def delete_confluence_pat():
+    current_user = auth.get_current_user()
+    if current_user is None:
+        return redirect(f"/?docx_error={quote('로그인이 필요합니다.')}")
+
+    confluence_credentials.delete_pat(current_user["user_id"])
+    return redirect(f"/?docx_message={quote('내 Confluence PAT을 삭제했습니다.')}")
 
 
 LOGIN_PAGE_TEMPLATE = """

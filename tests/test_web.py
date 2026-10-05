@@ -5,8 +5,9 @@ from pathlib import Path
 from unittest import mock
 
 from confluence_agenda.builder import build_email_subject
-from confluence_agenda.web import auth
+from confluence_agenda.web import auth, confluence_credentials
 from confluence_agenda.web.app import app, main
+from confluence_agenda.web.docx_export import DocxExportUnavailable
 
 _TEST_CONTACTS = [
     {"name": "테스트유저1", "email": "user1@example.com"},
@@ -272,6 +273,144 @@ class LoginFlowTest(unittest.TestCase):
         fake_clear.assert_called_once()
         self.assertEqual(resp.status_code, 302)
         self.assertEqual(resp.headers["Location"], "/login")
+
+
+class ConfluenceDocxAndPatTest(unittest.TestCase):
+    """컨플루언스 -> Word 변환 라우트와, 사용자별 PAT 등록/삭제 라우트."""
+
+    def setUp(self):
+        app.testing = True
+        self.client = app.test_client()
+
+    def test_confluence_to_docx_without_url_redirects_with_error(self):
+        resp = self.client.post(
+            "/confluence-to-docx", data={"confluence_url": ""}, follow_redirects=False
+        )
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("docx_error=", resp.headers["Location"])
+
+    def test_confluence_to_docx_without_token_redirects_with_error(self):
+        with mock.patch.dict("os.environ", {}, clear=True):
+            resp = self.client.post(
+                "/confluence-to-docx",
+                data={"confluence_url": "https://wiki.example.com/pages/123"},
+                follow_redirects=False,
+            )
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("PAT", resp.headers["Location"])
+
+    def test_confluence_to_docx_success_sends_file(self):
+        env = {"CONFLUENCE_API_TOKEN": "global-token"}
+        with mock.patch.dict("os.environ", env, clear=True), mock.patch(
+            "confluence_agenda.web.app.convert_confluence_url_to_docx",
+            return_value=(b"docx-bytes", "report.docx"),
+        ) as fake_convert:
+            resp = self.client.post(
+                "/confluence-to-docx",
+                data={"confluence_url": "https://wiki.example.com/pages/123"},
+                follow_redirects=False,
+            )
+
+        fake_convert.assert_called_once_with(
+            "https://wiki.example.com/pages/123", token="global-token"
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data, b"docx-bytes")
+        self.assertIn("report.docx", resp.headers["Content-Disposition"])
+
+    def test_confluence_to_docx_unavailable_error_redirects_with_message(self):
+        env = {"CONFLUENCE_API_TOKEN": "global-token"}
+        with mock.patch.dict("os.environ", env, clear=True), mock.patch(
+            "confluence_agenda.web.app.convert_confluence_url_to_docx",
+            side_effect=DocxExportUnavailable("doc2report가 설치되지 않았습니다."),
+        ):
+            resp = self.client.post(
+                "/confluence-to-docx",
+                data={"confluence_url": "https://wiki.example.com/pages/123"},
+                follow_redirects=False,
+            )
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("docx_error=", resp.headers["Location"])
+
+    def test_save_confluence_pat_requires_login(self):
+        with mock.patch.object(auth, "get_current_user", return_value=None):
+            resp = self.client.post(
+                "/confluence-pat", data={"confluence_pat": "x"}, follow_redirects=False
+            )
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("docx_error=", resp.headers["Location"])
+
+    def test_save_confluence_pat_requires_nonempty_value(self):
+        user = {"user_id": "dh.kwon", "display_name": "권동혁"}
+        with mock.patch.object(auth, "get_current_user", return_value=user):
+            resp = self.client.post(
+                "/confluence-pat", data={"confluence_pat": "   "}, follow_redirects=False
+            )
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("docx_error=", resp.headers["Location"])
+
+    def test_save_confluence_pat_success_calls_set_pat(self):
+        user = {"user_id": "dh.kwon", "display_name": "권동혁"}
+        with mock.patch.object(auth, "get_current_user", return_value=user), mock.patch.object(
+            confluence_credentials, "set_pat"
+        ) as fake_set:
+            resp = self.client.post(
+                "/confluence-pat", data={"confluence_pat": "my-new-pat"}, follow_redirects=False
+            )
+
+        fake_set.assert_called_once_with("dh.kwon", "my-new-pat")
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("docx_message=", resp.headers["Location"])
+
+    def test_save_confluence_pat_storage_unavailable_shows_error(self):
+        user = {"user_id": "dh.kwon", "display_name": "권동혁"}
+        with mock.patch.object(auth, "get_current_user", return_value=user), mock.patch.object(
+            confluence_credentials,
+            "set_pat",
+            side_effect=confluence_credentials.CredentialStorageUnavailable("설정이 없습니다"),
+        ):
+            resp = self.client.post(
+                "/confluence-pat", data={"confluence_pat": "my-new-pat"}, follow_redirects=False
+            )
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("docx_error=", resp.headers["Location"])
+
+    def test_delete_confluence_pat_requires_login(self):
+        with mock.patch.object(auth, "get_current_user", return_value=None):
+            resp = self.client.post("/confluence-pat/delete", follow_redirects=False)
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("docx_error=", resp.headers["Location"])
+
+    def test_delete_confluence_pat_calls_delete_pat(self):
+        user = {"user_id": "dh.kwon", "display_name": "권동혁"}
+        with mock.patch.object(auth, "get_current_user", return_value=user), mock.patch.object(
+            confluence_credentials, "delete_pat"
+        ) as fake_delete:
+            resp = self.client.post("/confluence-pat/delete", follow_redirects=False)
+
+        fake_delete.assert_called_once_with("dh.kwon")
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("docx_message=", resp.headers["Location"])
+
+    def test_index_shows_pat_registered_status_for_logged_in_user(self):
+        user = {"user_id": "dh.kwon", "display_name": "권동혁"}
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=True), \
+             mock.patch.object(auth, "get_current_user", return_value=user), \
+             mock.patch.object(confluence_credentials, "is_configured", return_value=True), \
+             mock.patch.object(confluence_credentials, "status", return_value=object()):
+            resp = self.client.get("/")
+
+        self.assertIn("등록되어 있습니다".encode(), resp.data)
+
+    def test_index_shows_not_registered_message_when_no_pat_yet(self):
+        user = {"user_id": "dh.kwon", "display_name": "권동혁"}
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=True), \
+             mock.patch.object(auth, "get_current_user", return_value=user), \
+             mock.patch.object(confluence_credentials, "is_configured", return_value=True), \
+             mock.patch.object(confluence_credentials, "status", return_value=None):
+            resp = self.client.get("/")
+
+        self.assertIn("아직 등록되지 않았습니다".encode(), resp.data)
 
 
 class MainStartupGuardTest(unittest.TestCase):
