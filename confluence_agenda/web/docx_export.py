@@ -7,14 +7,15 @@ wcoffee77/document-parsing(doc2report)을 참고했지만, 그 코드를 가져�
 필요가 없어서 "본문을 읽을 수 있는 Word 문서로" 수준으로 범위를 줄였다.
 
 지원하는 것: 제목(h1~h6, 아래 "구조적 변환" 설명처럼 번호 체계로 접힘),
-문단(굵게/기울임/밑줄/줄바꿈), 목록(ul/ol, 중첩 깊이 반영), 표(칸 병합 중
-colspan만 반영, 캡션/주석 자동 첨부), 패널/펼치기류 매크로(rich-text-body가
-있으면 그 내용만 펼침, 인라인 위치의 anchor류처럼 보이는 내용이 없는
-매크로는 조용히 건너뜀), 다른 페이지를 끌어오는 매크로(include/excerpt-
-include/children - doc2report의 sources/confluence.py::LinkedPages를
-참고해 직접 구현, 아래 "연결된 페이지" 설명 참고). 지원하지 않는 것
-(건너뛰고 자리만 표시): 이미지/첨부 다운로드, 행 병합(rowspan), 본문 링크
-(단순 하이퍼링크) 따라가기.
+문단(굵게/기울임/밑줄/줄바꿈), 목록(ul/ol, 중첩 깊이 반영), 표(칸 안에
+문단/목록이 여러 개면 각각 줄바꿈으로 구분, colspan·rowspan 병합(둘이
+같이 쓰여도 사각형으로 합쳐짐), 캡션/주석 자동 첨부), 패널/펼치기류
+매크로(rich-text-body가 있으면 그 내용만 펼침, 인라인 위치의 anchor류처럼
+보이는 내용이 없는 매크로는 조용히 건너뜀), 다른 페이지를 끌어오는
+매크로(include/excerpt-include/children - doc2report의
+sources/confluence.py::LinkedPages를 참고해 직접 구현, 아래 "연결된 페이지"
+설명 참고). 지원하지 않는 것(건너뛰고 자리만 표시): 이미지/첨부 다운로드,
+본문 링크(단순 하이퍼링크) 따라가기.
 
 글꼴/서식은 doc2report의 profiles/confluence.yaml(+ extends: default인
 profiles/default.yaml) 값을 그대로 옮겼다(_configure_document_styles) -
@@ -1202,7 +1203,7 @@ def _render_list(document: DocxDocument, list_element: etree._Element, *, ordere
 
 
 def _render_table(document: DocxDocument, table_element: etree._Element) -> None:
-    rows: List[List[etree._Element]] = []
+    rows: List[etree._Element] = []
     for section in table_element:
         section_tag = _local(section.tag)
         if section_tag in ("thead", "tbody", "tfoot"):
@@ -1210,32 +1211,51 @@ def _render_table(document: DocxDocument, table_element: etree._Element) -> None
         elif section_tag == "tr":
             rows.append(section)
 
-    cell_rows = [[cell for cell in row if _local(cell.tag) in ("td", "th")] for row in rows]
-    if not cell_rows:
+    html_rows = [[cell for cell in row if _local(cell.tag) in ("td", "th")] for row in rows]
+    if not html_rows:
         return
-    col_count = max(len(row) for row in cell_rows)
+    row_count = len(html_rows)
 
-    table = document.add_table(rows=len(cell_rows), cols=col_count)
+    # HTML 표는 rowspan으로 가린 칸을 그 행의 <td>/<th> 목록에 안 쓴다(표 자체가
+    # "건너뛴 자리"를 아는 게 아니라, 렌더러가 이전 행들의 rowspan을 추적해서
+    # 알아내야 한다) - occupied[행]에 그 행에서 이미 이전 행의 rowspan으로 찬
+    # 칸의 열 번호를 모아 둔다.
+    occupied: List[set] = [set() for _ in range(row_count)]
+    placements: List[Tuple[int, int, int, int, etree._Element]] = []
+    col_count = 0
+
+    for row_index, cells in enumerate(html_rows):
+        col_index = 0
+        for cell in cells:
+            while col_index in occupied[row_index]:
+                col_index += 1
+            colspan = max(1, _int_attr(cell, "colspan"))
+            rowspan = max(1, _int_attr(cell, "rowspan"))
+            placements.append((row_index, col_index, rowspan, colspan, cell))
+            for future_row in range(row_index + 1, min(row_index + rowspan, row_count)):
+                occupied[future_row].update(range(col_index, col_index + colspan))
+            col_index += colspan
+        col_count = max(col_count, col_index)
+
+    if col_count == 0:
+        return
+
+    table = document.add_table(rows=row_count, cols=col_count)
     try:
         table.style = "Table Grid"
     except KeyError:
         pass
 
-    for row_index, cells in enumerate(cell_rows):
-        col_index = 0
-        for cell in cells:
-            if col_index >= col_count:
-                break
-            colspan = max(1, _int_attr(cell, "colspan"))
-            span = min(colspan, col_count - col_index)
-            docx_cell = table.cell(row_index, col_index)
-            if span > 1:
-                docx_cell = docx_cell.merge(table.cell(row_index, col_index + span - 1))
-            is_header = _local(cell.tag) == "th"
-            _render_cell_content(docx_cell, cell, bold=is_header)
-            if is_header:
-                _shade_cell(docx_cell, _TABLE_HEADER_SHADING_HEX)
-            col_index += span
+    for row_index, col_index, rowspan, colspan, cell in placements:
+        end_row = min(row_index + rowspan, row_count) - 1
+        end_col = min(col_index + colspan, col_count) - 1
+        docx_cell = table.cell(row_index, col_index)
+        if end_row != row_index or end_col != col_index:
+            docx_cell = docx_cell.merge(table.cell(end_row, end_col))
+        is_header = _local(cell.tag) == "th"
+        _render_cell_content(docx_cell, cell, bold=is_header)
+        if is_header:
+            _shade_cell(docx_cell, _TABLE_HEADER_SHADING_HEX)
 
 
 _CELL_BLOCK_TAGS = ("p", "ul", "ol")

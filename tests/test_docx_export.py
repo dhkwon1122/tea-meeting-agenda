@@ -548,6 +548,46 @@ class RenderedDocxContentTest(unittest.TestCase):
         # 병합된 칸이라 (0,0)과 (0,1)이 같은 셀을 가리켜야 한다.
         self.assertEqual(table.cell(0, 0)._tc, table.cell(0, 1)._tc)
 
+    def test_rowspan_merges_cells_vertically_and_keeps_columns_aligned(self):
+        # 세로로 합쳐진 칸 - 합쳐진 칸 아래 행들은 그 칸이 "없는" 것처럼
+        # <td>를 하나 덜 쓰는데(HTML 표의 정상적인 표현), 렌더러가 이걸
+        # 추적하지 않으면 그 아래 행들의 칸이 한 칸씩 왼쪽으로 밀려 보인다.
+        storage = (
+            "<table><tbody>"
+            '<tr><td rowspan="2">카테고리A</td><td>항목1</td></tr>'
+            "<tr><td>항목2</td></tr>"
+            "<tr><td>카테고리B</td><td>항목3</td></tr>"
+            "</tbody></table>"
+        )
+        data = self._convert(storage)
+        document = DocxDocument(io.BytesIO(data))
+        table = document.tables[0]
+        self.assertEqual(
+            [[table.cell(r, c).text for c in range(2)] for r in range(3)],
+            [["카테고리A", "항목1"], ["카테고리A", "항목2"], ["카테고리B", "항목3"]],
+        )
+        # (0,0)과 (1,0)이 같은 병합된 셀을 가리켜야 한다.
+        self.assertEqual(table.cell(0, 0)._tc, table.cell(1, 0)._tc)
+        # 세 번째 행의 칸은 병합과 무관한 별개의 셀이어야 한다.
+        self.assertNotEqual(table.cell(0, 0)._tc, table.cell(2, 0)._tc)
+
+    def test_rowspan_and_colspan_combine_into_one_rectangular_merge(self):
+        storage = (
+            "<table><tbody>"
+            '<tr><td rowspan="2" colspan="2">큰 칸</td><td>c</td></tr>'
+            "<tr><td>d</td></tr>"
+            "</tbody></table>"
+        )
+        data = self._convert(storage)
+        document = DocxDocument(io.BytesIO(data))
+        table = document.tables[0]
+        big_cell = table.cell(0, 0)._tc
+        self.assertEqual(table.cell(0, 1)._tc, big_cell)
+        self.assertEqual(table.cell(1, 0)._tc, big_cell)
+        self.assertEqual(table.cell(1, 1)._tc, big_cell)
+        self.assertEqual(table.cell(0, 2).text, "c")
+        self.assertEqual(table.cell(1, 2).text, "d")
+
     def test_inline_macro_without_rich_text_body_does_not_leak_parameter_text(self):
         # 이 프로젝트의 builder.py가 실제로 쓰는 패턴 - 문단 중간에 anchor
         # 매크로를 끼워 넣는다. rich-text-body가 없는 인라인 매크로의
