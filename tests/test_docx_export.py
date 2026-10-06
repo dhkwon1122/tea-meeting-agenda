@@ -899,6 +899,56 @@ class LinkedPagesExpansionTest(unittest.TestCase):
         self.assertNotIn("(첨부 1) 안건1", texts)
         self.assertIn("첨부 내용입니다.", texts)
 
+    def test_include_macro_wrapped_in_lone_p_still_renders_table_and_line_breaks(self):
+        # builder.py의 실제 패턴 - include 매크로가 "<p>{macro}</p>"처럼 <p>
+        # 안에 홀로 들어있다. 매크로 바로 옆에만 펼친 내용을 끼워 넣으면 그
+        # 내용이 <p> "안에" 들어가 버려서, 렌더링할 때 그 <p> 전체가 한
+        # 문단으로 뭉개진다(표가 안 그려지고 줄바꿈도 사라짐 - 실사용에서
+        # 발견된 버그). <p> 전체를 대신해야 바깥 블록 내용으로 제대로 펼쳐진다.
+        root_storage = (
+            "<h2>원본 섹션</h2>"
+            '<p><ac:structured-macro ac:name="include" '
+            'xmlns:ac="http://www.atlassian.com/schema/confluence/4/ac/" '
+            'xmlns:ri="http://www.atlassian.com/schema/confluence/4/ri/">'
+            '<ac:parameter ac:name=""><ac:link>'
+            '<ri:page ri:content-title="첨부 페이지"/>'
+            "</ac:link></ac:parameter>"
+            "</ac:structured-macro></p>"
+        )
+        sub_storage = (
+            "<table><tbody>"
+            '<tr><td rowspan="2">카테고리A</td><td><p>첫째 줄</p><p>둘째 줄</p></td></tr>'
+            "<tr><td>항목2</td></tr>"
+            "</tbody></table>"
+        )
+        root_resp = _page_response(root_storage, title="회의록")
+        sub_resp = _fake_response(
+            json_data={
+                "results": [
+                    {"id": "999", "title": "첨부 페이지", "body": {"storage": {"value": sub_storage}}}
+                ]
+            }
+        )
+
+        def fake_get(url, **kwargs):
+            if url.endswith("/rest/api/content/123"):
+                return root_resp
+            if url.endswith("/rest/api/content"):
+                return sub_resp
+            raise AssertionError(f"unexpected url: {url}")
+
+        with mock.patch("requests.get", side_effect=fake_get):
+            data, _ = convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+        document = DocxDocument(io.BytesIO(data))
+        self.assertEqual(len(document.tables), 1)
+        table = document.tables[0]
+        self.assertEqual(
+            [[table.cell(r, c).text for c in range(2)] for r in range(2)],
+            [["카테고리A", "첫째 줄\n둘째 줄"], ["카테고리A", "항목2"]],
+        )
+        self.assertEqual([p.text for p in table.cell(0, 1).paragraphs], ["첫째 줄", "둘째 줄"])
+
     def test_numbering_restarts_at_each_linked_page(self):
         # doc2report의 render/docx_writer.py가 제목(여기서는 연결된 페이지의 제목)을
         # 만나면 번호 카운터를 다시 1부터 센다 - 원본 페이지에서 "1."까지 쓴 뒤

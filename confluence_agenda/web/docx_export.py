@@ -608,19 +608,44 @@ def _resolve_target_page(
     return None
 
 
+def _unwrap_lone_p_ancestor(element: etree._Element) -> etree._Element:
+    """교체할 자리를 찾는다 - 매크로가 <p> 안에 홀로 들어있으면(이 프로젝트
+    builder.py의 실제 패턴: "<p>{include_html}</p>") 매크로 자리가 아니라
+    그 <p> 전체를 대신해야 한다. <p> 안에 표/제목 같은 블록 내용을 그대로
+    끼워 넣으면 _render_blocks가 그 <p>를 한 문단으로 통째로 평평하게
+    펼쳐버려서(안에 있던 표가 안 그려지고 줄바꿈도 전부 사라짐) 안 된다 -
+    실제로 연결된 페이지에서 이 증상으로 나타난 버그였다. <p>에 이 매크로
+    말고 다른 내용이 같이 있으면(드문 경우) 매크로 자리만 바꾸는 쪽이 더
+    안전하므로 그때는 올라가지 않는다."""
+    target = element
+    parent = target.getparent()
+    while (
+        parent is not None
+        and _local(parent.tag) == "p"
+        and len(parent) == 1
+        and not (parent.text or "").strip()
+        and not (target.tail or "").strip()
+    ):
+        target = parent
+        parent = target.getparent()
+    return target
+
+
 def _replace_macro_with_placeholder(macro: etree._Element, message: str) -> None:
+    target = _unwrap_lone_p_ancestor(macro)
     placeholder = etree.Element("p")
     placeholder.text = message
-    macro.addnext(placeholder)
-    macro.getparent().remove(macro)
+    target.addnext(placeholder)
+    target.getparent().remove(target)
 
 
 def _splice_elements_in_place(macro: etree._Element, new_elements: List[etree._Element]) -> None:
-    anchor = macro
+    target = _unwrap_lone_p_ancestor(macro)
+    anchor = target
     for new_elem in new_elements:
         anchor.addnext(new_elem)
         anchor = new_elem
-    macro.getparent().remove(macro)
+    target.getparent().remove(target)
 
 
 def _page_section_elements(title: str, sub_root: etree._Element) -> List[etree._Element]:
