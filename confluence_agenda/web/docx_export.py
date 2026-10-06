@@ -6,23 +6,34 @@ wcoffee77/document-parsing(doc2report)을 참고했지만, 그 코드를 가져�
 한국어 문구 다듬기까지 하는 꽤 큰 파이프라인인데, 여기서는 그 전체를 가져올
 필요가 없어서 "본문을 읽을 수 있는 Word 문서로" 수준으로 범위를 줄였다.
 
-지원하는 것: 제목(h1~h6), 문단(굵게/기울임/밑줄/줄바꿈), 목록(ul/ol, 평평하게),
-표(칸 병합 중 colspan만 반영), 패널/펼치기류 매크로(rich-text-body가 있으면
-그 내용만 펼침), 다른 페이지를 끌어오는 매크로(include/excerpt-include/
-children - doc2report의 sources/confluence.py::LinkedPages를 참고해 직접
-구현, 아래 "연결된 페이지" 설명 참고). 지원하지 않는 것(건너뛰고 자리만
-표시): 이미지/첨부 다운로드, 행 병합(rowspan), 본문 링크(단순 하이퍼링크)
-따라가기.
+지원하는 것: 제목(h1~h6, 아래 "구조적 변환" 설명처럼 번호 체계로 접힘),
+문단(굵게/기울임/밑줄/줄바꿈), 목록(ul/ol, 중첩 깊이 반영), 표(칸 병합 중
+colspan만 반영, 캡션/주석 자동 첨부), 패널/펼치기류 매크로(rich-text-body가
+있으면 그 내용만 펼침, 인라인 위치의 anchor류처럼 보이는 내용이 없는
+매크로는 조용히 건너뜀), 다른 페이지를 끌어오는 매크로(include/excerpt-
+include/children - doc2report의 sources/confluence.py::LinkedPages를
+참고해 직접 구현, 아래 "연결된 페이지" 설명 참고). 지원하지 않는 것
+(건너뛰고 자리만 표시): 이미지/첨부 다운로드, 행 병합(rowspan), 본문 링크
+(단순 하이퍼링크) 따라가기.
 
 글꼴/서식은 doc2report의 profiles/confluence.yaml(+ extends: default인
 profiles/default.yaml) 값을 그대로 옮겼다(_configure_document_styles) -
-맑은 고딕, 본문 12pt, 제목(문서 맨 위) 18pt·가운데·밑줄, 소제목 1/2/3단계
-15/14/14pt 굵게, 표 10pt, 여백 20mm, 표 머리행 음영 F2F2F2. 다만 그
-프로파일의 "제목을 1./□/- 번호 체계로 접어 넣는" 구조화 변환(fold_headings_
-into_levels), 표 칸 폭에 맞춰 글자 크기를 단계적으로 줄이는 알고리즘, 문장
-다듬기 등은 가져오지 않았다 - 글꼴·크기·여백 같은 "값"은 그대로 옮길 수
-있지만 그 변환 로직들은 doc2report 코드 자체(수백~수천 줄)를 들여와야 해서
-범위 밖으로 남겨뒀다.
+맑은 고딕, 본문 12pt, 제목(문서 맨 위) 18pt·가운데·밑줄, 표 10pt, 여백
+20mm, 표 머리행 음영 F2F2F2.
+
+구조적 변환(_fold_headings_into_levels/_tag_table_captions_and_notes)도
+doc2report의 transform/structure.py를 참고해 들여왔다 - 제목(h1~h6)과 그
+아래 문단/목록을 "1. → □ → -" 사내 보고서 번호 체계로 접어 넣고(원문에
+이미 "1." "□" 같은 말머리가 쳐 있으면 그대로 쓰고 새로 붙이지 않음,
+h2 없이 h3부터 시작해도 첫 단계가 0cm가 되도록 전체 최저 단계를 민다 -
+이 프로젝트의 builder.py가 쓰는 h3 전용 제목 구조가 바로 이 경우다), 표
+바로 위의 꺾쇠 캡션과 표 바로 뒤의 주석(*, ※, 인용문)은 번호 항목이 아니라
+표에 붙는 설명으로 처리한다. 다만 "같은 단계의 짧은 항목을 '및'으로
+병합"(merge_short_list_items)과 한국어 문장을 개조식 명사형 종결로 바꾸는
+변환·LLM 기반 문장 다듬기는 일부러 가져오지 않았다 - doc2report 자신의
+confluence.yaml이 Confluence 입력에는 전부 꺼 두는 옵션들이다(각각
+text.merge_short_items: false, text.polish: none) - 같은 이유로 여기서도
+생략했다. 자세한 설명은 "구조적 변환" 섹션의 주석 참고.
 
 연결된 페이지(include/excerpt-include/children 매크로)는 실제로 다른
 페이지를 REST API로 더 불러와 그 자리에 쪽 나눔 + 제목으로 펼친다 - 이
@@ -608,9 +619,12 @@ def _splice_elements_in_place(macro: etree._Element, new_elements: List[etree._E
 
 def _page_section_elements(title: str, sub_root: etree._Element) -> List[etree._Element]:
     """쪽 나눔 + (접두어를 뗀) 제목 + 하위 페이지 본문으로 이어지는 요소 목록을
-    만든다 - include/children 둘 다 이걸로 매크로 자리를 채운다."""
+    만든다 - include/children 둘 다 이걸로 매크로 자리를 채운다. "pagetitle"은
+    진짜 Confluence 태그가 아니라 _fold_headings_into_levels가 doc2report의
+    Heading.page_title과 똑같이 다루는(번호 체계에 접지 않고 문서 제목 서식을
+    그대로 쓰며, 항목 번호를 거기서부터 다시 센다) 합성 태그다."""
     pagebreak = etree.Element("pagebreak")
-    heading = etree.Element("h1")
+    heading = etree.Element("pagetitle")
     heading.text = _clean_included_title(title)
     return [pagebreak, heading] + list(sub_root)
 
@@ -729,6 +743,252 @@ def _clean_text(text: Optional[str]) -> str:
     return _WHITESPACE_RE.sub(" ", text) if text else ""
 
 
+# ── 구조적 변환: 제목을 번호 체계로 접어넣기 + 표 캡션/주석 자동 첨부 ──────
+#
+# doc2report의 transform/structure.py를 참고해(코드는 가져오지 않고 알고리즘만
+# 참고해 이 파일에 새로 구현) 제목(h1~h6)과 그 아래 문단/목록을 "1. → □ → -"
+# 식 사내 보고서 단락 체계로 접어 넣는다(그 모듈 docstring의 예: "## 추진 배경
+# → 1. 추진 배경"). doc2report의 confluence.yaml은 auto_markers(말머리 없는
+# 제목에 새 말머리를 붙이는 옵션)를 꺼 두지만 - "이미 Confluence 제목 스타일로
+# 구분된 문서라 말머리가 필요 없다"는 판단 - 여기서는 default.yaml 쪽인
+# auto_markers=true를 그대로 썼다. 그 예시가 보여주는 "제목에 번호가 실제로
+# 보이는" 결과가 이 기능의 핵심이라고 판단했기 때문이다. 원문에 이미 "1."
+# "□" 같은 말머리가 쳐 있으면(keep_leading_markers) 그건 그대로 쓰고 새로
+# 붙이지 않는다.
+#
+# 표 캡션/주석 자동 첨부(attach_table_captions/attach_table_notes)도 그대로
+# 들여왔다 - 표 바로 위의 꺾쇠 캡션("【사업현황】")과 표 바로 뒤의 주석(*, ※,
+# 인용문)은 번호 항목이 되지 않고 표에 붙는 설명으로 처리된다.
+#
+# 다만 "같은 단계의 짧은 항목을 '및'으로 병합"(merge_short_list_items)은
+# 일부러 들여오지 않았다 - doc2report 자신의 confluence.yaml이 "및 병합도
+# 문장을 바꾸는 일"이라며 Confluence 입력에는 이 옵션을 꺼 둔다
+# (text.merge_short_items: false). 같은 이유로 여기서도 생략했다. 한국어
+# 문장을 개조식 명사형 종결로 바꾸는 변환(gaechosik/noun_ending)과 LLM 기반
+# 문장 다듬기도 범위 밖이다 - 둘 다 doc2report의 confluence.yaml 자체가
+# Confluence 입력에는 끄는 옵션이고(text.polish: none), 특히 문장 다듬기는
+# 별도의 한국어 어미 변환 규칙 시스템이나 LLM 호출이 필요해 이 기능의 범위를
+# 크게 넘어선다.
+
+_NUMBERING_LEVELS = [
+    {"marker": "{n}.", "indent_mm": 0, "hanging_mm": 7},
+    {"marker": "□", "indent_mm": 4, "hanging_mm": 6},
+    {"marker": "-", "indent_mm": 8, "hanging_mm": 5},
+    {"marker": "·", "indent_mm": 12, "hanging_mm": 5},
+]
+_HEADING_FOLD_BASE = 2  # h2가 첫 단계(depth 0)가 된다 - h1은 문서/쪽 제목용.
+
+_LEVEL_SYMBOL_ALIASES = {
+    "□": ["■", "◻", "ㅁ"],
+    "-": ["–", "—"],
+    "·": ["ㆍ", "ᆞ", "‧", "∙", "•"],
+}
+_LEVEL_SYMBOL_TO_DEPTH: dict = {}
+for _depth, _level in enumerate(_NUMBERING_LEVELS):
+    if "{n}" not in _level["marker"]:
+        _LEVEL_SYMBOL_TO_DEPTH[_level["marker"]] = _depth
+for _marker, _aliases in _LEVEL_SYMBOL_ALIASES.items():
+    for _alias in _aliases:
+        _LEVEL_SYMBOL_TO_DEPTH[_alias] = _LEVEL_SYMBOL_TO_DEPTH[_marker]
+
+# 원문에 이미 쳐 있는 말머리 인식: "1." "1)" "(1)" 숫자 번호, "가." "나)" 한글
+# 번호, "□"/"-"/"·" 계열 기호(그 변형 포함). doc2report의 leading_markers 중
+# ①~⑳/※ 등은 범위를 줄여 뺐다.
+_EXISTING_NUMBER_RE = re.compile(r"^\s*(?:\(\d{1,2}\)|\d{1,2}(?:\.\d{1,2})*[.)])(?!\d)\s*")
+_HANGUL_ENUM_RE = re.compile(
+    r"^\s*(?:\([가나다라마바사아자차카타파하]\)|[가나다라마바사아자차카타파하][.)])\s+"
+)
+_MARKER_SYMBOL_RE = re.compile(
+    "^\\s*(?:"
+    + "|".join(
+        f"{re.escape(m)}(?!{re.escape(m)})" if not m.isascii() else rf"{re.escape(m)}\s+"
+        for m in sorted(_LEVEL_SYMBOL_TO_DEPTH, key=len, reverse=True)
+    )
+    + ")\\s*"
+)
+
+
+def _find_leading_marker(text: str) -> Optional[Tuple[str, str]]:
+    """문단/제목 맨 앞의 말머리를 찾는다 - (말머리 문자열, 말머리를 뗀 나머지
+    텍스트). 말머리만 있고 본문이 없으면("1." 단독) 못 찾은 것으로 본다."""
+    for pattern in (_EXISTING_NUMBER_RE, _HANGUL_ENUM_RE, _MARKER_SYMBOL_RE):
+        match = pattern.match(text)
+        if match and match.end() < len(text.rstrip()):
+            return text[: match.end()].strip(), text[match.end() :]
+    return None
+
+
+def _marker_depth(marker: str) -> Optional[int]:
+    first = marker[:1]
+    if first.isdigit() or first in "가나다라마바사아자차카타파하":
+        return 0
+    return _LEVEL_SYMBOL_TO_DEPTH.get(marker)
+
+
+def _leading_text_holder(element: etree._Element) -> Optional[etree._Element]:
+    """맨 앞 글자를 실제로 담고 있는 요소를 찾는다 - element.text가 비어 있으면
+    첫 자식으로 계속 내려간다. builder.py가 만드는 안건 제목처럼
+    "<h3><strong><span>1. 안건1 …"처럼 말머리가 서식 태그 안에 중첩돼 있는
+    경우에도 찾을 수 있게(doc2report의 IR은 처음부터 runs가 평평해서 이
+    문제가 없지만, 여기서는 원본 lxml 트리를 그대로 쓰므로 직접 찾아야 한다)."""
+    node = element
+    while True:
+        if node.text:
+            return node
+        if len(node) == 0:
+            return None
+        node = node[0]
+
+
+def _element_leading_marker(element: etree._Element) -> Optional[Tuple[str, str]]:
+    holder = _leading_text_holder(element)
+    return _find_leading_marker(holder.text) if holder is not None else None
+
+
+def _convert_to_listitem(element: etree._Element, depth: int, *, from_heading: bool = False) -> None:
+    """요소를 그 자리에서(태그만 바꿔서) "listitem"으로 바꾼다 - 내용(자식/서식)은
+    그대로 두고 번호 체계 렌더링에 필요한 정보만 속성으로 얹는다."""
+    holder = _leading_text_holder(element)
+    if holder is not None:
+        found = _find_leading_marker(holder.text)
+        if found is not None:
+            marker, rest = found
+            holder.text = rest
+            element.set("data-marker", marker)
+    element.tag = "listitem"
+    element.set("data-depth", str(max(0, depth)))
+    if from_heading:
+        element.set("data-from-heading", "1")
+
+
+def _flatten_list_items(list_element: etree._Element, base_depth: int) -> List[etree._Element]:
+    """<ul>/<ol>의 <li>들을 중첩 깊이만큼 depth를 올려 가며 평평한 listitem
+    목록으로 바꾼다(nested <ul>/<ol>은 그 자리에서 떼어 바로 뒤이어 펼친다)."""
+    flat: List[etree._Element] = []
+    for item in list_element:
+        if _local(item.tag) != "li":
+            continue
+        nested = [child for child in item if _local(child.tag) in ("ul", "ol")]
+        for nested_list in nested:
+            item.remove(nested_list)
+        _convert_to_listitem(item, base_depth)
+        flat.append(item)
+        for nested_list in nested:
+            flat.extend(_flatten_list_items(nested_list, base_depth + 1))
+    return flat
+
+
+def _fold_headings_into_levels(root: etree._Element) -> None:
+    """제목(h1~h6)과 그 아래 문단/목록을 번호 체계 단계(listitem)로 접어
+    넣는다 - doc2report의 fold_headings_into_levels와 같은 규칙, 이 파일의
+    lxml 트리 위에서 직접(제자리에서) 수행한다."""
+    state = {"depth": -1}
+
+    def walk(container: etree._Element) -> None:
+        for child in list(container):
+            tag = _local(child.tag)
+            if tag == "pagetitle":
+                state["depth"] = -1
+            elif tag in _HEADING_LEVELS:
+                depth = max(0, _HEADING_LEVELS[tag] - _HEADING_FOLD_BASE)
+                state["depth"] = depth
+                _convert_to_listitem(child, depth, from_heading=True)
+            elif tag in ("ul", "ol"):
+                items = _flatten_list_items(child, state["depth"] + 1)
+                _splice_elements_in_place(child, items)
+            elif tag == "p":
+                if not _clean_text("".join(child.itertext())).strip():
+                    # <p><br/></p> 같은 빈 여백용 문단(이 프로젝트의 builder.py가
+                    # 안건 사이 여백으로 실제로 쓴다) - 번호 항목으로 접지 않고
+                    # 그대로 둔다("-\t" 같은 빈 말머리가 붙으면 안 되므로).
+                    continue
+                found = _element_leading_marker(child)
+                if state["depth"] >= 0:
+                    target_depth = state["depth"] + 1
+                    if found is not None:
+                        implied = _marker_depth(found[0])
+                        if implied is not None:
+                            target_depth = max(target_depth, implied)
+                    _convert_to_listitem(child, target_depth)
+                elif found is not None:
+                    depth = _marker_depth(found[0])
+                    if depth is not None:
+                        _convert_to_listitem(child, depth)
+            elif tag in _BLOCK_FLATTEN_TAGS:
+                walk(child)
+            elif _is_ac(child, "structured-macro"):
+                body = child.find("ac:rich-text-body", namespaces={"ac": _AC_NS})
+                if body is not None:
+                    walk(body)
+            # table/image/tablecaption/tablenote/기타 매크로 - 그대로 두고
+            # 단계 상태도 바꾸지 않는다(표 아래 다음 문단이 표 때문에 얕아지거나
+            # 깊어지지 않게).
+
+    walk(root)
+    _normalize_listitem_depths(root)
+
+
+def _normalize_listitem_depths(root: etree._Element) -> None:
+    """문서에서 가장 바깥 단계를 0(= "1.")으로 민다(doc2report의
+    text.normalize_levels) - 본문이 h2 없이 h3부터 시작해도(이 프로젝트의
+    builder.py가 만드는 안건 제목이 전부 h3인 경우처럼) 첫 문장이 괜히
+    "□" 단계로 들여써지지 않게. 연결된 페이지까지 다 펼친 뒤의 전체 문서
+    기준으로 한 번만 민다(doc2report도 쪽마다 따로가 아니라 합친 문서
+    전체에서 한 번에 민다)."""
+    listitems = [el for el in root.iter() if _local(el.tag) == "listitem"]
+    if not listitems:
+        return
+    shift = min(int(el.get("data-depth", "0")) for el in listitems)
+    if shift:
+        for el in listitems:
+            el.set("data-depth", str(int(el.get("data-depth", "0")) - shift))
+
+
+_BRACKET_PAIRS = [("[", "]"), ("［", "］"), ("【", "】"), ("〔", "〕"), ("〈", "〉"), ("《", "》")]
+_TABLE_NOTE_MARKERS = ("*", "※", "주)", "주:")
+
+
+def _is_bracket_caption(text: str) -> bool:
+    return any(
+        text.startswith(open_c) and text.endswith(close_c) and len(text) > len(open_c) + len(close_c)
+        for open_c, close_c in _BRACKET_PAIRS
+    )
+
+
+def _is_table_note_block(element: etree._Element) -> bool:
+    tag = _local(element.tag)
+    if tag == "blockquote":
+        return True
+    if tag == "p":
+        return _clean_text(element.text).lstrip().startswith(_TABLE_NOTE_MARKERS)
+    return False
+
+
+def _tag_table_captions_and_notes(container: etree._Element) -> None:
+    """표 바로 위의 꺾쇠 캡션("【사업현황】")은 "tablecaption"으로, 표 바로
+    뒤의 주석(*, ※, 주) 문단이나 인용문은 "tablenote"로 태그만 바꿔 둔다 -
+    _fold_headings_into_levels보다 먼저 돌아야 한다(그 전에 해두지 않으면
+    캡션/주석도 번호 항목이 되어 "- 【사업현황】"처럼 말머리가 붙어 버린다)."""
+    children = list(container)
+    for index, child in enumerate(children):
+        tag = _local(child.tag)
+        if tag == "table":
+            previous = children[index - 1] if index > 0 else None
+            if previous is not None and _local(previous.tag) == "p":
+                if _is_bracket_caption(_clean_text(previous.text).strip()):
+                    previous.tag = "tablecaption"
+            j = index + 1
+            while j < len(children) and _is_table_note_block(children[j]):
+                children[j].tag = "tablenote"
+                j += 1
+        elif tag in _BLOCK_FLATTEN_TAGS:
+            _tag_table_captions_and_notes(child)
+        elif _is_ac(child, "structured-macro"):
+            body = child.find("ac:rich-text-body", namespaces={"ac": _AC_NS})
+            if body is not None:
+                _tag_table_captions_and_notes(body)
+
+
 # ── storage XHTML → .docx ───────────────────────────────────────────────
 
 _HEADING_LEVELS = {f"h{n}": n for n in range(1, 7)}
@@ -792,16 +1052,19 @@ def _configure_document_styles(document: DocxDocument) -> None:
 
 
 def _render_document(title: str, root: etree._Element) -> bytes:
+    _tag_table_captions_and_notes(root)
+    _fold_headings_into_levels(root)
+
     document = DocxDocument()
     _configure_document_styles(document)
     document.add_heading(title or "", level=0)
-    _render_blocks(document, root)
+    _render_blocks(document, root, {})
     buf = BytesIO()
     document.save(buf)
     return buf.getvalue()
 
 
-def _render_blocks(document: DocxDocument, container: etree._Element) -> None:
+def _render_blocks(document: DocxDocument, container: etree._Element, counters: dict) -> None:
     for element in container:
         tag = _local(element.tag)
 
@@ -809,7 +1072,30 @@ def _render_blocks(document: DocxDocument, container: etree._Element) -> None:
             # 연결된 페이지(include/children) 사이에 끼워 넣는 쪽 나눔 - 진짜
             # Confluence 태그가 아니라 _resolve_linked_pages가 만들어 넣는 합성 요소.
             document.add_page_break()
+        elif tag == "pagetitle":
+            # 연결된 페이지의 제목 - doc2report의 Heading.page_title과 같이
+            # 번호 체계에 접지 않고 문서 제목 서식을 쓰며, 항목 번호를 새로 센다.
+            counters.clear()
+            _add_inline_runs(document.add_heading("", level=0), element)
+        elif tag == "listitem":
+            _render_listitem(document, element, counters)
+        elif tag == "tablecaption":
+            paragraph = document.add_paragraph()
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run = paragraph.add_run(_clean_text(element.text))
+            run.bold = True
+            run.font.size = Pt(12)
+        elif tag == "tablenote":
+            inner_paragraphs = [child for child in element if _local(child.tag) == "p"]
+            for source in inner_paragraphs or [element]:
+                paragraph = document.add_paragraph()
+                _add_inline_runs(paragraph, source)
+                for run in paragraph.runs:
+                    run.font.size = Pt(10)
         elif tag in _HEADING_LEVELS:
+            # _fold_headings_into_levels가 보통 다 listitem으로 바꿔서 여기까지
+            # 안 오지만(표 셀 안 등 그 변환이 안 들어간 자리를 위한 안전망), 혹시
+            # 남아 있으면 기존 방식(Heading 스타일)으로라도 렌더링한다.
             _add_inline_runs(document.add_heading("", level=_HEADING_LEVELS[tag]), element)
         elif tag == "p":
             _add_inline_runs(document.add_paragraph(), element)
@@ -826,21 +1112,61 @@ def _render_blocks(document: DocxDocument, container: etree._Element) -> None:
         elif _is_ac(element, "image"):
             _render_image_placeholder(document, element)
         elif _is_ac(element, "structured-macro"):
-            _render_macro(document, element)
+            _render_macro(document, element, counters)
         elif tag in _BLOCK_FLATTEN_TAGS:
             # 레이아웃용 래퍼(ac:layout 등) - 내용만 순서대로 펼친다.
-            _render_blocks(document, element)
+            _render_blocks(document, element, counters)
         elif _clean_text(element.text).strip() or len(element):
             # 알 수 없는 블록 요소 - 내용은 최대한 살려서 평문단으로.
             _add_inline_runs(document.add_paragraph(), element)
 
 
-def _render_macro(document: DocxDocument, macro: etree._Element) -> None:
+def _render_listitem(document: DocxDocument, element: etree._Element, counters: dict) -> None:
+    """번호 체계 단계(1./□/-/·) 항목 하나를 렌더링한다 - doc2report의
+    render/docx_writer.py::_list_item을 참고해 새로 구현(내어쓰기/탭 정렬,
+    말머리 자동 번호 매기기)."""
+    depth = int(element.get("data-depth", "0"))
+    level = _NUMBERING_LEVELS[min(depth, len(_NUMBERING_LEVELS) - 1)]
+    marker = element.get("data-marker")
+    if marker is None:
+        marker = _format_marker(level["marker"], depth, counters)
+    # 제목에서 접어 넣은 항목은 원문 굵기와 무관하게 항상 굵게(doc2report와 동일) -
+    # 그 외(원래 목록/문단이던 항목)는 원문 서식(굵게/기울임 등)만 그대로 쓴다.
+    bold = element.get("data-from-heading") == "1"
+
+    paragraph = document.add_paragraph()
+    paragraph.paragraph_format.left_indent = Mm(level["indent_mm"])
+    if marker:
+        paragraph.paragraph_format.first_line_indent = Mm(-level["hanging_mm"])
+        paragraph.paragraph_format.tab_stops.add_tab_stop(Mm(level["indent_mm"]))
+        marker_run = paragraph.add_run(marker + "\t")
+        marker_run.bold = bold or None
+    _add_inline_runs(paragraph, element, bold=bold)
+
+
+def _format_marker(template: str, depth: int, counters: dict) -> str:
+    if "{n}" not in template:
+        return template
+    for deeper in [d for d in counters if d > depth]:
+        del counters[d]
+    counters[depth] = counters.get(depth, 0) + 1
+    return template.format(n=counters[depth])
+
+
+# rich-text-body가 없고 화면에 보이는 내용도 전혀 없는 매크로(둘 다 이
+# 프로젝트의 builder.py가 실제로 블록 위치에 단독으로 쓴다) - "지원하지
+# 않습니다" 자리표시자를 보여줄 필요 없이 조용히 건너뛴다.
+_SILENT_BLOCK_MACRO_NAMES = {"anchor", "create-from-template"}
+
+
+def _render_macro(document: DocxDocument, macro: etree._Element, counters: dict) -> None:
     body = macro.find("ac:rich-text-body", namespaces={"ac": _AC_NS})
     if body is not None:
-        _render_blocks(document, body)
+        _render_blocks(document, body, counters)
         return
     name = macro.get(f"{{{_AC_NS}}}name") or "매크로"
+    if name in _SILENT_BLOCK_MACRO_NAMES:
+        return
     note = document.add_paragraph(f"[{name} 매크로 - 이 변환에서는 지원하지 않습니다]")
     note.runs[0].italic = True
 
@@ -936,8 +1262,19 @@ def _add_inline_runs(paragraph, element: etree._Element, *, bold=False, italic=F
             kwargs = {"bold": bold, "italic": italic, "underline": underline}
             kwargs[_INLINE_STYLE_TAGS[tag]] = True
             _add_inline_runs(paragraph, child, **kwargs)
+        elif _is_ac(child, "structured-macro"):
+            # 문단 중간에 끼어드는 매크로(anchor/create-from-template 등, 이
+            # 프로젝트의 builder.py가 실제로 이렇게 쓴다) - rich-text-body가
+            # 있으면 그 내용만 펼치고, 없으면 화면에 보이는 내용이 없는
+            # 매크로이므로 건너뛴다. ac:parameter 값(매크로 설정·버튼 ID 등)을
+            # 본문 텍스트로 잘못 끌어오면 안 된다(예: "제목1" 북마크 이름이나
+            # "3877634148" 템플릿 ID가 본문에 그대로 섞여 나오던 문제).
+            body = child.find("ac:rich-text-body", namespaces={"ac": _AC_NS})
+            if body is not None:
+                _add_inline_runs(paragraph, body, bold=bold, italic=italic, underline=underline)
         else:
-            # a(링크, 글자만 살리고 하이퍼링크는 안 만듦)/span/code 등 - 내용은 그대로 펼친다.
+            # a(링크, 글자만 살리고 하이퍼링크는 안 만듦)/span/code/ac:link 등 -
+            # 내용은 그대로 펼친다.
             _add_inline_runs(paragraph, child, bold=bold, italic=italic, underline=underline)
 
         tail = _clean_text(child.tail)

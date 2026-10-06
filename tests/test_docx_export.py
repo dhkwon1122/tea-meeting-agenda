@@ -480,10 +480,13 @@ class RenderedDocxContentTest(unittest.TestCase):
         self.assertIn("회의록", _docx_paragraph_texts(data))
 
     def test_headings_and_paragraph_are_preserved(self):
+        # 구조적 변환(제목 접어넣기)으로 h2는 1단계("1.") 항목이 되고, 그 아래
+        # 평문단은 한 단계 더 들어간 항목("□")이 된다(doc2report의 fold_headings_
+        # into_levels와 같은 규칙) - 말머리+탭이 같은 문단 안에 같이 들어간다.
         data = self._convert("<h2>소제목</h2><p>본문 내용입니다.</p>")
         texts = _docx_paragraph_texts(data)
-        self.assertIn("소제목", texts)
-        self.assertIn("본문 내용입니다.", texts)
+        self.assertIn("1.\t소제목", texts)
+        self.assertIn("□\t본문 내용입니다.", texts)
 
     def test_bold_and_italic_runs_are_preserved(self):
         data = self._convert("<p>일반 <strong>굵게</strong>와 <em>기울임</em> 텍스트</p>")
@@ -495,10 +498,11 @@ class RenderedDocxContentTest(unittest.TestCase):
         self.assertTrue(italic_runs and italic_runs[0].italic)
 
     def test_bullet_list_items_become_separate_paragraphs(self):
+        # 제목 없이 바로 나오는 목록은 1단계("1.")부터 시작한다(doc2report와 동일).
         data = self._convert("<ul><li>첫째</li><li>둘째</li></ul>")
         texts = _docx_paragraph_texts(data)
-        self.assertIn("첫째", texts)
-        self.assertIn("둘째", texts)
+        self.assertIn("1.\t첫째", texts)
+        self.assertIn("2.\t둘째", texts)
 
     def test_table_cells_are_preserved(self):
         storage = (
@@ -526,6 +530,35 @@ class RenderedDocxContentTest(unittest.TestCase):
         self.assertEqual(table.cell(0, 0).text, "합쳐진 칸")
         # 병합된 칸이라 (0,0)과 (0,1)이 같은 셀을 가리켜야 한다.
         self.assertEqual(table.cell(0, 0)._tc, table.cell(0, 1)._tc)
+
+    def test_inline_macro_without_rich_text_body_does_not_leak_parameter_text(self):
+        # 이 프로젝트의 builder.py가 실제로 쓰는 패턴 - 문단 중간에 anchor
+        # 매크로를 끼워 넣는다. rich-text-body가 없는 인라인 매크로의
+        # ac:parameter 값("제목1" 같은 북마크 이름)이 본문 텍스트로 섞여
+        # 나오면 안 된다(실제로 이렇게 새던 버그).
+        storage = (
+            '<p>안건1 <ac:structured-macro ac:name="anchor" '
+            'xmlns:ac="http://www.atlassian.com/schema/confluence/4/ac/">'
+            '<ac:parameter ac:name="">제목1</ac:parameter>'
+            "</ac:structured-macro> 뒷부분</p>"
+        )
+        data = self._convert(storage)
+        texts = _docx_paragraph_texts(data)
+        self.assertIn("안건1  뒷부분", texts)
+        self.assertNotIn("안건1 제목1 뒷부분", texts)
+        self.assertFalse(any("제목1" in t for t in texts))
+
+    def test_block_level_anchor_macro_produces_no_placeholder(self):
+        storage = (
+            '<ac:structured-macro ac:name="anchor" '
+            'xmlns:ac="http://www.atlassian.com/schema/confluence/4/ac/">'
+            '<ac:parameter ac:name="">첨부1</ac:parameter>'
+            "</ac:structured-macro>"
+        )
+        data = self._convert(storage)
+        texts = _docx_paragraph_texts(data)
+        self.assertFalse(any("지원하지 않습니다" in t for t in texts))
+        self.assertFalse(any("첨부1" in t for t in texts))
 
     def test_macro_rich_text_body_is_unwrapped(self):
         storage = (
@@ -644,6 +677,122 @@ class DiagnoseConnectionTest(unittest.TestCase):
         self.assertTrue(any("✓ CONFLUENCE_DATA_CLASSIFICATION 설정됨" in l for l in lines))
 
 
+class StructuralFoldTest(unittest.TestCase):
+    """제목을 번호 체계(1./□/-)로 접어넣는 구조적 변환과 표 캡션/주석 자동
+    첨부(_fold_headings_into_levels/_tag_table_captions_and_notes)를 확인한다."""
+
+    def setUp(self):
+        self._env_patch = mock.patch.dict(
+            os.environ, {"CONFLUENCE_URL": "https://wiki.example.com"}, clear=True
+        )
+        self._env_patch.start()
+        self.addCleanup(self._env_patch.stop)
+
+    def _convert(self, storage_html: str, *, title: str = "테스트 문서") -> bytes:
+        resp = _page_response(storage_html, title=title)
+        with mock.patch("requests.get", return_value=resp):
+            data, _ = convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+        return data
+
+    def test_sequential_h2_headings_get_auto_incrementing_numbers(self):
+        data = self._convert("<h2>추진 배경</h2><h2>세부 계획</h2>")
+        texts = _docx_paragraph_texts(data)
+        self.assertIn("1.\t추진 배경", texts)
+        self.assertIn("2.\t세부 계획", texts)
+
+    def test_heading_levels_map_to_box_then_dash_markers(self):
+        data = self._convert("<h2>대분류</h2><h3>중분류</h3><h4>소분류</h4>")
+        texts = _docx_paragraph_texts(data)
+        self.assertIn("1.\t대분류", texts)
+        self.assertIn("□\t중분류", texts)
+        self.assertIn("-\t소분류", texts)
+
+    def test_heading_with_existing_marker_text_is_kept_verbatim_not_doubled(self):
+        # 원문에 이미 "1." 같은 말머리가 타이핑돼 있으면 그대로 쓰고 새로
+        # 붙이지 않는다(keep_leading_markers) - "1.\t1. 추진 배경"처럼 겹치면 안 된다.
+        data = self._convert("<h2>1. 추진 배경</h2>")
+        texts = _docx_paragraph_texts(data)
+        self.assertIn("1.\t추진 배경", texts)
+        self.assertNotIn("1.\t1. 추진 배경", texts)
+
+    def test_nested_list_depth_follows_heading_then_restarts_sibling_counter(self):
+        data = self._convert("<ul><li>A<ul><li>A-1</li></ul></li><li>B</li></ul>")
+        texts = _docx_paragraph_texts(data)
+        self.assertIn("1.\tA", texts)
+        self.assertIn("□\tA-1", texts)
+        self.assertIn("2.\tB", texts)
+
+    def test_table_bracket_caption_is_not_a_numbered_item(self):
+        storage = "<p>【사업현황】</p><table><tbody><tr><td>내용</td></tr></tbody></table>"
+        data = self._convert(storage)
+        texts = _docx_paragraph_texts(data)
+        self.assertIn("【사업현황】", texts)
+        self.assertNotIn("1.\t【사업현황】", texts)
+
+    def test_table_note_paragraph_is_not_a_numbered_item(self):
+        storage = (
+            "<table><tbody><tr><td>내용</td></tr></tbody></table>"
+            "<p>* 측정 기준은 내부 지표입니다.</p>"
+        )
+        data = self._convert(storage)
+        texts = _docx_paragraph_texts(data)
+        self.assertIn("* 측정 기준은 내부 지표입니다.", texts)
+        self.assertNotIn("1.\t* 측정 기준은 내부 지표입니다.", texts)
+
+    def test_table_note_blockquote_is_not_a_numbered_item(self):
+        storage = (
+            "<table><tbody><tr><td>내용</td></tr></tbody></table>"
+            "<blockquote><p>측정 기준은 내부 지표입니다.</p></blockquote>"
+        )
+        data = self._convert(storage)
+        texts = _docx_paragraph_texts(data)
+        self.assertIn("측정 기준은 내부 지표입니다.", texts)
+        self.assertNotIn("1.\t측정 기준은 내부 지표입니다.", texts)
+
+    def test_paragraph_under_heading_without_marker_becomes_next_depth_item(self):
+        data = self._convert("<h2>소제목</h2><p>본문</p><p>본문2</p>")
+        texts = _docx_paragraph_texts(data)
+        self.assertIn("□\t본문", texts)
+        self.assertIn("□\t본문2", texts)
+
+    def test_paragraph_before_any_heading_with_no_marker_stays_plain(self):
+        data = self._convert("<p>제목도 말머리도 없는 문단</p>")
+        texts = _docx_paragraph_texts(data)
+        self.assertIn("제목도 말머리도 없는 문단", texts)
+
+    def test_blank_spacer_paragraph_under_heading_does_not_become_empty_bullet(self):
+        # builder.py가 안건 사이 여백으로 실제로 쓰는 "<p><br/></p>" - 제목
+        # 아래라고 해서 "-\t"처럼 빈 말머리가 붙은 항목이 되면 안 된다.
+        data = self._convert("<h2>소제목</h2><p><br/></p><p>본문</p>")
+        texts = _docx_paragraph_texts(data)
+        self.assertFalse(any(t.strip() in ("-", "□", "·") for t in texts))
+        self.assertIn("□\t본문", texts)
+
+    def test_h3_only_document_normalizes_to_depth_zero_not_box_level(self):
+        # h2 없이 h3부터 시작하는 문서(normalize_levels) - h3는 원래 depth1("□")이지만
+        # 문서 전체의 최저 단계가 h3뿐이면 그 최저 단계를 0("1.")으로 민다.
+        data = self._convert("<h3>첫 항목</h3><h3>둘째 항목</h3>")
+        texts = _docx_paragraph_texts(data)
+        self.assertIn("1.\t첫 항목", texts)
+        self.assertIn("2.\t둘째 항목", texts)
+
+    def test_heading_with_marker_nested_inside_formatting_tags_is_detected(self):
+        # 이 프로젝트의 builder.py가 실제로 만드는 안건 제목 구조 -
+        # "<h3><strong><span>1. 안건1 …" - 말머리 "1."이 h3.text가 아니라
+        # 서식 태그 두 겹 안의 span.text에 있다. normalize_levels로 h3가
+        # depth0이 되면서 원문의 "1."과 들여쓰기가 맞아떨어져야 하고, 말머리가
+        # 겹쳐 "1.\t1. 안건1"처럼 두 번 나오면 안 된다.
+        storage = (
+            '<h3 style="text-align: left;"><strong><span>'
+            "1. 안건1 "
+            "</span></strong></h3>"
+        )
+        data = self._convert(storage)
+        texts = _docx_paragraph_texts(data)
+        self.assertIn("1.\t안건1 ", texts)
+        self.assertNotIn("1.\t1. 안건1 ", texts)
+
+
 class LinkedPagesExpansionTest(unittest.TestCase):
     """include/excerpt-include/children 매크로가 실제로 다른 페이지를 더 불러와
     그 자리에 펼쳐지는지 확인한다(_resolve_linked_pages)."""
@@ -692,6 +841,47 @@ class LinkedPagesExpansionTest(unittest.TestCase):
         self.assertIn("안건1", texts)  # "(첨부 1)" 접두어가 제거된 제목
         self.assertNotIn("(첨부 1) 안건1", texts)
         self.assertIn("첨부 내용입니다.", texts)
+
+    def test_numbering_restarts_at_each_linked_page(self):
+        # doc2report의 render/docx_writer.py가 제목(여기서는 연결된 페이지의 제목)을
+        # 만나면 번호 카운터를 다시 1부터 센다 - 원본 페이지에서 "1."까지 쓴 뒤
+        # 연결된 페이지로 넘어가면 그 페이지의 첫 항목도 "1."부터 다시 시작해야 한다.
+        root_storage = (
+            "<h2>원본 제목</h2>"
+            '<ac:structured-macro ac:name="include" '
+            'xmlns:ac="http://www.atlassian.com/schema/confluence/4/ac/" '
+            'xmlns:ri="http://www.atlassian.com/schema/confluence/4/ri/">'
+            '<ac:parameter ac:name=""><ac:link>'
+            '<ri:page ri:content-title="첨부 페이지"/>'
+            "</ac:link></ac:parameter>"
+            "</ac:structured-macro>"
+        )
+        root_resp = _page_response(root_storage, title="회의록")
+        sub_resp = _fake_response(
+            json_data={
+                "results": [
+                    {
+                        "id": "999",
+                        "title": "첨부 페이지",
+                        "body": {"storage": {"value": "<h2>첨부 제목</h2>"}},
+                    }
+                ]
+            }
+        )
+
+        def fake_get(url, **kwargs):
+            if url.endswith("/rest/api/content/123"):
+                return root_resp
+            if url.endswith("/rest/api/content"):
+                return sub_resp
+            raise AssertionError(f"unexpected url: {url}")
+
+        with mock.patch("requests.get", side_effect=fake_get):
+            data, _ = convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+        texts = _docx_paragraph_texts(data)
+        self.assertIn("1.\t원본 제목", texts)
+        self.assertIn("1.\t첨부 제목", texts)  # "2."가 아니라 새 쪽에서 다시 "1."
 
     def test_children_macro_expands_each_child_page(self):
         root_storage = (
