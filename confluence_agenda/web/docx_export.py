@@ -354,7 +354,7 @@ def diagnose_connection(token: Optional[str] = None) -> List[str]:
     )
 
     headers = _request_headers(effective_token)
-    lines.append(f"  보낼 헤더 이름: {sorted(headers.keys())}")
+    lines.append(f"  보낼 헤더 이름: {', '.join(sorted(headers.keys()))}")
 
     verify_url = f"{base_url}/rest/api/user/current"
     lines.append(f"→ 실제 요청 URL: GET {verify_url}")

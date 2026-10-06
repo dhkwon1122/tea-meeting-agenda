@@ -379,6 +379,38 @@ class ConfluenceDocxAndPatTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 302)
         self.assertIn("docx_error=", resp.headers["Location"])
 
+    def test_save_confluence_pat_verification_failure_shows_diagnostic_detail(self):
+        """화면 에러 메시지가 그냥 "PAT 확인 실패: ..." 한 줄이 아니라,
+        diagnose_connection()의 단계별 결과(요청 URL/DEP_TICKET 상태 등)를
+        그대로 담아서 터미널 없이도 원인을 좁힐 수 있게 해야 한다."""
+        user = {"user_id": "dh.kwon", "display_name": "권동혁"}
+        diagnostic_lines = [
+            "✓ CONFLUENCE_URL 설정됨 → 실제 요청 기준 주소: https://wiki.example.com",
+            "→ 실제 요청 URL: GET https://wiki.example.com/rest/api/user/current",
+            "✗ 요청 실패: RuntimeError: Confluence 인증 실패(401)",
+        ]
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=True), \
+             mock.patch.object(auth, "get_current_user", return_value=user), \
+             mock.patch(
+                 "confluence_agenda.web.app.verify_confluence_token",
+                 side_effect=RuntimeError("Confluence 인증 실패(401)"),
+             ), \
+             mock.patch(
+                 "confluence_agenda.web.app.diagnose_confluence_connection",
+                 return_value=diagnostic_lines,
+             ) as fake_diagnose, \
+             mock.patch.object(confluence_credentials, "set_pat") as fake_set:
+            post_resp = self.client.post(
+                "/confluence-pat", data={"confluence_pat": "wrong-pat"}, follow_redirects=False
+            )
+            resp = self.client.get(post_resp.headers["Location"])
+
+        fake_diagnose.assert_called_once_with("wrong-pat")
+        fake_set.assert_not_called()
+        body = resp.data.decode("utf-8")
+        self.assertIn("실제 요청 URL", body)
+        self.assertIn("rest/api/user/current", body)
+
     def test_save_confluence_pat_storage_unavailable_shows_error(self):
         user = {"user_id": "dh.kwon", "display_name": "권동혁"}
         with mock.patch.object(auth, "get_current_user", return_value=user), mock.patch(

@@ -30,6 +30,7 @@ from . import auth, confluence_credentials
 from .contacts import load_preset_contacts
 from .diagram import build_macro_diagram_html
 from .docx_export import DocxExportUnavailable, convert_confluence_url_to_docx
+from .docx_export import diagnose_connection as diagnose_confluence_connection
 from .docx_export import is_feature_available as docx_export_configured
 from .docx_export import resolve_token as resolve_confluence_token
 from .docx_export import verify_token as verify_confluence_token
@@ -146,6 +147,7 @@ _APP_STYLE = """
 
   .message {
     padding: 12px 16px; border-radius: 8px; margin-bottom: 20px; font-size: 0.88rem;
+    white-space: pre-wrap;
   }
   .message.ok { background: var(--ok-bg); color: var(--ok-text); }
   .message.error { background: var(--error-bg); color: var(--error-text); }
@@ -531,11 +533,17 @@ def save_confluence_pat():
         owner = verify_confluence_token(pat)
     except DocxExportUnavailable as e:
         return redirect(f"/confluence-to-docx?docx_error={quote(str(e))}")
-    except Exception as e:
+    except Exception:
         # PAT이 틀렸거나(401/익명 응답), 서버 연결 자체가 안 되는 경우 -
         # 등록자가 적은 이름을 그대로 믿지 않고, Confluence가 확인해주지
-        # 못한 토큰은 저장하지 않는다(토큰 도용 방지).
-        return redirect(f"/confluence-to-docx?docx_error={quote(f'PAT 확인 실패: {e}')}")
+        # 못한 토큰은 저장하지 않는다(토큰 도용 방지). 예외 메시지 한 줄만
+        # 보여주면 "PAT 확인 실패: HTTPSConnectionPool(...)" 처럼 원인을
+        # 특정하기 어려운 경우가 많아서, diagnose_connection()의 단계별
+        # 결과(요청 URL, CA 경로, DEP_TICKET 설정 여부 등)를 그대로 보여준다
+        # - 터미널 접속 없이도 화면에서 바로 원인을 좁힐 수 있게.
+        detail = "\n".join(diagnose_confluence_connection(pat))
+        message = "PAT 확인 실패:\n" + detail
+        return redirect(f"/confluence-to-docx?docx_error={quote(message)}")
 
     try:
         confluence_credentials.set_pat(current_user["user_id"], pat)
