@@ -1,3 +1,4 @@
+import base64
 import io
 import os
 import tempfile
@@ -443,6 +444,7 @@ class ConvertConfluenceUrlToDocxHttpTest(unittest.TestCase):
             [
                 "컨플루언스 페이지 조회 중...",
                 "본문 분석 중...",
+                "이미지 가져오는 중...",
                 "연결된 하위 페이지 포함 중...",
                 "Word 문서 생성 중...",
                 "완료",
@@ -1156,6 +1158,139 @@ class DocumentStyleConfigurationTest(unittest.TestCase):
         data_run = table.cell(1, 0).paragraphs[0].runs[0]
         self.assertEqual(data_run.font.size, Pt(10))
         self.assertFalse(data_run.bold)
+
+
+_PNG_1PX = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+
+
+class ImageEmbeddingTest(unittest.TestCase):
+    """ac:image가 실제 첨부파일 내용으로 그려지는지 확인한다
+    (_fetch_images_for_page/_render_image) - 전에는 파일명만 보여주는
+    자리표시자였다."""
+
+    def setUp(self):
+        self._env_patch = mock.patch.dict(
+            os.environ, {"CONFLUENCE_URL": "https://wiki.example.com"}, clear=True
+        )
+        self._env_patch.start()
+        self.addCleanup(self._env_patch.stop)
+
+    def test_image_with_matching_attachment_is_embedded_not_placeholder(self):
+        root_storage = (
+            "<h2>스크린샷</h2>"
+            '<ac:image xmlns:ac="http://www.atlassian.com/schema/confluence/4/ac/" '
+            'xmlns:ri="http://www.atlassian.com/schema/confluence/4/ri/">'
+            '<ri:attachment ri:filename="shot.png"/>'
+            "</ac:image>"
+        )
+        root_resp = _page_response(root_storage, title="회의록")
+        attachments_resp = _fake_response(
+            json_data={
+                "results": [
+                    {"title": "shot.png", "_links": {"download": "/download/attachments/123/shot.png"}}
+                ]
+            }
+        )
+        download_resp = _fake_response(text="")
+        download_resp.content = _PNG_1PX
+
+        def fake_get(url, **kwargs):
+            if url.endswith("/rest/api/content/123"):
+                return root_resp
+            if url.endswith("/rest/api/content/123/child/attachment"):
+                return attachments_resp
+            if url.endswith("/download/attachments/123/shot.png"):
+                return download_resp
+            raise AssertionError(f"unexpected url: {url}")
+
+        with mock.patch("requests.get", side_effect=fake_get):
+            data, _ = convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+        document = DocxDocument(io.BytesIO(data))
+        self.assertEqual(len(document.inline_shapes), 1)
+        self.assertFalse(any("shot.png" in t for t in _docx_paragraph_texts(data)))
+
+    def test_image_without_matching_attachment_falls_back_to_placeholder(self):
+        root_storage = (
+            '<ac:image xmlns:ac="http://www.atlassian.com/schema/confluence/4/ac/" '
+            'xmlns:ri="http://www.atlassian.com/schema/confluence/4/ri/">'
+            '<ri:attachment ri:filename="missing.png"/>'
+            "</ac:image>"
+        )
+        root_resp = _page_response(root_storage, title="회의록")
+        attachments_resp = _fake_response(json_data={"results": []})
+
+        def fake_get(url, **kwargs):
+            if url.endswith("/rest/api/content/123"):
+                return root_resp
+            if url.endswith("/rest/api/content/123/child/attachment"):
+                return attachments_resp
+            raise AssertionError(f"unexpected url: {url}")
+
+        with mock.patch("requests.get", side_effect=fake_get):
+            data, _ = convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+        document = DocxDocument(io.BytesIO(data))
+        self.assertEqual(len(document.inline_shapes), 0)
+        self.assertTrue(any("missing.png" in t for t in _docx_paragraph_texts(data)))
+
+    def test_image_inside_linked_page_is_fetched_from_that_pages_own_attachments(self):
+        # 연결된 페이지의 이미지는 그 페이지 "자신"의 첨부파일 목록에서
+        # 찾아야 한다(원본 페이지의 첨부파일 목록과 혼동하면 안 됨).
+        root_storage = (
+            '<p><ac:structured-macro ac:name="include" '
+            'xmlns:ac="http://www.atlassian.com/schema/confluence/4/ac/" '
+            'xmlns:ri="http://www.atlassian.com/schema/confluence/4/ri/">'
+            '<ac:parameter ac:name=""><ac:link>'
+            '<ri:page ri:content-title="첨부 페이지"/>'
+            "</ac:link></ac:parameter>"
+            "</ac:structured-macro></p>"
+        )
+        sub_storage = (
+            '<ac:image xmlns:ac="http://www.atlassian.com/schema/confluence/4/ac/" '
+            'xmlns:ri="http://www.atlassian.com/schema/confluence/4/ri/">'
+            '<ri:attachment ri:filename="sub.png"/>'
+            "</ac:image>"
+        )
+        root_resp = _page_response(root_storage, title="회의록")
+        sub_resp = _fake_response(
+            json_data={
+                "results": [
+                    {"id": "999", "title": "첨부 페이지", "body": {"storage": {"value": sub_storage}}}
+                ]
+            }
+        )
+        root_attachments_resp = _fake_response(json_data={"results": []})
+        sub_attachments_resp = _fake_response(
+            json_data={
+                "results": [
+                    {"title": "sub.png", "_links": {"download": "/download/attachments/999/sub.png"}}
+                ]
+            }
+        )
+        download_resp = _fake_response(text="")
+        download_resp.content = _PNG_1PX
+
+        def fake_get(url, **kwargs):
+            if url.endswith("/rest/api/content/123"):
+                return root_resp
+            if url.endswith("/rest/api/content/123/child/attachment"):
+                return root_attachments_resp
+            if url.endswith("/rest/api/content"):
+                return sub_resp
+            if url.endswith("/rest/api/content/999/child/attachment"):
+                return sub_attachments_resp
+            if url.endswith("/download/attachments/999/sub.png"):
+                return download_resp
+            raise AssertionError(f"unexpected url: {url}")
+
+        with mock.patch("requests.get", side_effect=fake_get):
+            data, _ = convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+        document = DocxDocument(io.BytesIO(data))
+        self.assertEqual(len(document.inline_shapes), 1)
 
 
 class DocxBytesToPreviewHtmlTest(unittest.TestCase):

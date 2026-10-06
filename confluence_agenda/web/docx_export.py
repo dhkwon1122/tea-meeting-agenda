@@ -9,13 +9,14 @@ wcoffee77/document-parsing(doc2report)을 참고했지만, 그 코드를 가져�
 지원하는 것: 제목(h1~h6, 아래 "구조적 변환" 설명처럼 번호 체계로 접힘),
 문단(굵게/기울임/밑줄/줄바꿈), 목록(ul/ol, 중첩 깊이 반영), 표(칸 안에
 문단/목록이 여러 개면 각각 줄바꿈으로 구분, colspan·rowspan 병합(둘이
-같이 쓰여도 사각형으로 합쳐짐), 캡션/주석 자동 첨부), 패널/펼치기류
-매크로(rich-text-body가 있으면 그 내용만 펼침, 인라인 위치의 anchor류처럼
-보이는 내용이 없는 매크로는 조용히 건너뜀), 다른 페이지를 끌어오는
-매크로(include/excerpt-include/children - doc2report의
+같이 쓰여도 사각형으로 합쳐짐), 캡션/주석 자동 첨부), 이미지(그 페이지의
+첨부파일을 실제로 내려받아 그려 넣음, 아래 "이미지" 설명 참고), 패널/
+펼치기류 매크로(rich-text-body가 있으면 그 내용만 펼침, 인라인 위치의
+anchor류처럼 보이는 내용이 없는 매크로는 조용히 건너뜀), 다른 페이지를
+끌어오는 매크로(include/excerpt-include/children - doc2report의
 sources/confluence.py::LinkedPages를 참고해 직접 구현, 아래 "연결된 페이지"
-설명 참고). 지원하지 않는 것(건너뛰고 자리만 표시): 이미지/첨부 다운로드,
-본문 링크(단순 하이퍼링크) 따라가기.
+설명 참고). 지원하지 않는 것(건너뛰고 자리만 표시): 행 병합이 아닌 첨부
+파일(문서 등 이미지가 아닌 것), 본문 링크(단순 하이퍼링크) 따라가기.
 
 글꼴/서식은 doc2report의 profiles/confluence.yaml(+ extends: default인
 profiles/default.yaml) 값을 그대로 옮겼다(_configure_document_styles) -
@@ -43,6 +44,16 @@ text.merge_short_items: false, text.polish: none) - 같은 이유로 여기서�
 제목에서 "(첨부 N)" 접두어를 떼는 것도 doc2report의 text.page_title_strip
 규칙을 그대로 따옴). 순환 참조/과도한 중첩은 깊이 4단계·전체 40페이지로
 제한한다(doc2report의 MAX_LINK_DEPTH/MAX_LINKED_PAGES와 동일한 값).
+
+이미지(ac:image)는 그 페이지의 첨부파일 목록(_fetch_page_attachments)에서
+같은 파일명을 찾아 실제 내용을 내려받아(_fetch_attachment_bytes) 그려
+넣는다(_render_image) - 본문 폭(170mm)보다 큰 이미지만 비율을 유지한 채
+줄이고, 작은 이미지는 원본 크기 그대로 둔다. 연결된 페이지에 있는
+이미지는 "그 페이지 자신"의 첨부파일 목록에서 찾아야 한다 - 여러 페이지가
+include/children으로 한 문서에 합쳐지고 나면 어느 이미지가 원래 어느
+페이지 것이었는지 더는 구분할 수 없으므로, 각 페이지를 펼치는 바로 그
+자리에서(합치기 전에) 미리 받아 둔다. 첨부파일을 못 찾거나 받아오지
+못하면(네트워크 오류 등) 예전처럼 파일명만 보여주는 자리표시자로 빠진다.
 
 CONFLUENCE_URL이 없으면 이 기능 자체가 꺼진다(is_feature_available() False).
 
@@ -76,6 +87,7 @@ from __future__ import annotations
 
 import base64
 import html
+import itertools
 import os
 import re
 from io import BytesIO
@@ -533,6 +545,94 @@ def _fetch_child_pages(base_url: str, token: str, page_id: str) -> List[dict]:
     return resp.json().get("results") or []
 
 
+def _fetch_page_attachments(base_url: str, token: str, page_id: str) -> dict:
+    """그 페이지에 실제로 붙어 있는 첨부파일 목록을 (파일명 -> 다운로드
+    경로) 맵으로 가져온다 - ac:image가 참조하는 ri:attachment는 파일명만
+    있고 실제로 받을 수 있는 URL이 없어서, 이 목록에서 같은 파일명을 찾아
+    그 다운로드 경로(_links.download, 사이트 루트 기준 상대 경로)로
+    내려받는다. 실패하면(네트워크 오류 등) 조용히 빈 맵을 돌려준다 -
+    이미지 하나를 못 가져왔다고 변환 전체가 실패하면 안 되므로, 못 가져온
+    이미지는 자리표시자로 대신한다."""
+    try:
+        resp = requests.get(
+            f"{base_url}/rest/api/content/{page_id}/child/attachment",
+            params={"limit": 200},
+            headers=_request_headers(token),
+            timeout=30,
+            verify=_ssl_verify(),
+            proxies=_proxies(),
+        )
+    except (requests.RequestException, OSError):
+        return {}
+    if resp.status_code != 200:
+        return {}
+    mapping = {}
+    for item in resp.json().get("results") or []:
+        filename = item.get("title")
+        download = (item.get("_links") or {}).get("download")
+        if filename and download:
+            mapping[filename] = download
+    return mapping
+
+
+def _fetch_attachment_bytes(base_url: str, token: str, download_path: str) -> Optional[bytes]:
+    url = download_path if download_path.startswith("http") else f"{base_url}{download_path}"
+    try:
+        resp = requests.get(
+            url,
+            headers=_request_headers(token),
+            timeout=30,
+            verify=_ssl_verify(),
+            proxies=_proxies(),
+        )
+    except (requests.RequestException, OSError):
+        return None
+    if resp.status_code != 200:
+        return None
+    return resp.content
+
+
+_image_key_counter = itertools.count()
+
+
+def _fetch_images_for_page(
+    container: etree._Element, base_url: str, token: str, page_id: str, images_out: dict
+) -> None:
+    """container(루트 페이지 전체 또는 연결된 한 페이지의 본문) 안의
+    ac:image가 가리키는 첨부파일을 전부 내려받아 images_out에 채운다 -
+    (키 -> 이미지 바이트). 키는 id(element)가 아니라 요소에 직접 심어 둔
+    속성("data-image-key")이다 - lxml은 같은 노드라도 트리를 손댄 뒤
+    다시 접근하면 다른 Python 객체(다른 id())를 돌려줄 수 있어서, 나중에
+    렌더링할 때 object id로 찾으면 못 찾는 경우가 있었다(실제로 이 문제로
+    이미지가 전부 자리표시자로 빠졌다) - 속성은 XML 데이터 자체라 항상 그대로다.
+
+    container에 이미지가 하나도 없으면 첨부파일 목록 조회 자체를 건너뛴다
+    (불필요한 API 호출 방지). 반드시 그 이미지가 실제로 속한 페이지(=이
+    함수를 부르는 시점의 page_id)의 첨부파일 목록으로 찾아야 한다 - 연결된
+    여러 페이지가 하나의 트리로 합쳐지고 나면 "이 이미지가 원래 어느
+    페이지 것이었는지"를 더는 알 수 없기 때문에, 페이지를 펼치는 바로 그
+    자리에서 처리한다."""
+    image_elements = list(container.iter(f"{{{_AC_NS}}}image"))
+    if not image_elements:
+        return
+    attachments = _fetch_page_attachments(base_url, token, page_id)
+    if not attachments:
+        return
+    for image in image_elements:
+        attachment = image.find("ri:attachment", namespaces={"ri": _RI_NS})
+        if attachment is None:
+            continue
+        filename = attachment.get(f"{{{_RI_NS}}}filename")
+        download_path = attachments.get(filename) if filename else None
+        if not download_path:
+            continue
+        data = _fetch_attachment_bytes(base_url, token, download_path)
+        if data:
+            key = str(next(_image_key_counter))
+            image.set("data-image-key", key)
+            images_out[key] = data
+
+
 # ── 연결된 페이지(include/excerpt-include/children) 펼치기 ──────────────
 #
 # doc2report의 sources/confluence.py::LinkedPages를 참고해 직접 구현했다(코드
@@ -561,12 +661,17 @@ class _LinkContext:
     MAX_DEPTH = 4
     MAX_PAGES = 40
 
-    def __init__(self, base_url: str, token: str, space: Optional[str], root_page_id: str):
+    def __init__(
+        self, base_url: str, token: str, space: Optional[str], root_page_id: str, images: dict
+    ):
         self.base_url = base_url
         self.token = token
         self.space = space
         self.visited = {root_page_id}
         self.loaded = 0
+        # (요소 id -> 이미지 바이트) - 연결된 각 페이지 자신의 첨부파일에서
+        # 가져온 이미지를 전부 이 하나의 맵에 모은다(렌더링할 때 그대로 씀).
+        self.images = images
 
 
 def _link_limit_reached(ctx: _LinkContext, depth: int) -> bool:
@@ -711,6 +816,7 @@ def _expand_include_macro(macro: etree._Element, ctx: _LinkContext, depth: int) 
     ctx.visited.add(page_id)
     ctx.loaded += 1
     sub_root = _parse_storage(storage_html)
+    _fetch_images_for_page(sub_root, ctx.base_url, ctx.token, page_id, ctx.images)
     _resolve_linked_pages(sub_root, ctx, page_id, depth + 1)
     _splice_elements_in_place(macro, _page_section_elements(page.get("title") or title or "", sub_root))
 
@@ -738,6 +844,7 @@ def _expand_children_macro(
         ctx.visited.add(child_id)
         ctx.loaded += 1
         sub_root = _parse_storage(storage_html)
+        _fetch_images_for_page(sub_root, ctx.base_url, ctx.token, child_id, ctx.images)
         _resolve_linked_pages(sub_root, ctx, child_id, depth + 1)
         sections.extend(_page_section_elements(child.get("title") or "", sub_root))
 
@@ -1095,20 +1202,30 @@ def _configure_document_styles(document: DocxDocument) -> None:
         style.paragraph_format.keep_with_next = True
 
 
-def _render_document(title: str, root: etree._Element) -> bytes:
+class _RenderState:
+    """렌더링 전체에서 공유해야 하는 상태 - 번호 매기기 카운터(_format_marker,
+    연결된 페이지의 "pagetitle"마다 비워짐)와 미리 받아 둔 이미지 바이트
+    (_fetch_images_for_page가 채워 둔 것, "data-image-key" 속성값 -> 바이트)."""
+
+    def __init__(self, images: Optional[dict] = None):
+        self.counters: dict = {}
+        self.images: dict = images or {}
+
+
+def _render_document(title: str, root: etree._Element, images: Optional[dict] = None) -> bytes:
     _tag_table_captions_and_notes(root)
     _fold_headings_into_levels(root)
 
     document = DocxDocument()
     _configure_document_styles(document)
     document.add_heading(title or "", level=0)
-    _render_blocks(document, root, {})
+    _render_blocks(document, root, _RenderState(images))
     buf = BytesIO()
     document.save(buf)
     return buf.getvalue()
 
 
-def _render_blocks(document: DocxDocument, container: etree._Element, counters: dict) -> None:
+def _render_blocks(document: DocxDocument, container: etree._Element, state: "_RenderState") -> None:
     for element in container:
         tag = _local(element.tag)
 
@@ -1119,10 +1236,10 @@ def _render_blocks(document: DocxDocument, container: etree._Element, counters: 
         elif tag == "pagetitle":
             # 연결된 페이지의 제목 - doc2report의 Heading.page_title과 같이
             # 번호 체계에 접지 않고 문서 제목 서식을 쓰며, 항목 번호를 새로 센다.
-            counters.clear()
+            state.counters.clear()
             _add_inline_runs(document.add_heading("", level=0), element)
         elif tag == "listitem":
-            _render_listitem(document, element, counters)
+            _render_listitem(document, element, state.counters)
         elif tag == "tablecaption":
             paragraph = document.add_paragraph()
             paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -1154,12 +1271,12 @@ def _render_blocks(document: DocxDocument, container: etree._Element, counters: 
                 paragraph = document.add_paragraph()
             _add_inline_runs(paragraph, element)
         elif _is_ac(element, "image"):
-            _render_image_placeholder(document, element)
+            _render_image(document, element, state.images)
         elif _is_ac(element, "structured-macro"):
-            _render_macro(document, element, counters)
+            _render_macro(document, element, state)
         elif tag in _BLOCK_FLATTEN_TAGS:
             # 레이아웃용 래퍼(ac:layout 등) - 내용만 순서대로 펼친다.
-            _render_blocks(document, element, counters)
+            _render_blocks(document, element, state)
         elif _clean_text(element.text).strip() or len(element):
             # 알 수 없는 블록 요소 - 내용은 최대한 살려서 평문단으로.
             _add_inline_runs(document.add_paragraph(), element)
@@ -1203,10 +1320,10 @@ def _format_marker(template: str, depth: int, counters: dict) -> str:
 _SILENT_BLOCK_MACRO_NAMES = {"anchor", "create-from-template"}
 
 
-def _render_macro(document: DocxDocument, macro: etree._Element, counters: dict) -> None:
+def _render_macro(document: DocxDocument, macro: etree._Element, state: "_RenderState") -> None:
     body = macro.find("ac:rich-text-body", namespaces={"ac": _AC_NS})
     if body is not None:
-        _render_blocks(document, body, counters)
+        _render_blocks(document, body, state)
         return
     name = macro.get(f"{{{_AC_NS}}}name") or "매크로"
     if name in _SILENT_BLOCK_MACRO_NAMES:
@@ -1215,7 +1332,28 @@ def _render_macro(document: DocxDocument, macro: etree._Element, counters: dict)
     note.runs[0].italic = True
 
 
-def _render_image_placeholder(document: DocxDocument, image: etree._Element) -> None:
+# 본문 폭(A4, 좌우 여백 20mm씩 제외)을 넘지 않게 - 이보다 큰 이미지만 줄이고,
+# 작은 이미지는 원본 크기 그대로 둔다(작은 아이콘을 억지로 키우지 않도록).
+_MAX_IMAGE_WIDTH_MM = 170
+
+
+def _render_image(document: DocxDocument, image: etree._Element, images: dict) -> None:
+    """ac:image를 실제 첨부파일 내용으로 그려 넣는다 - convert_confluence_url_to_docx가
+    렌더링 전에 _fetch_images_for_page()로 미리 받아 둔 바이트를 쓴다.
+    못 받아왔으면(첨부파일을 못 찾음, 네트워크 오류 등) 예전처럼 파일명만
+    보여주는 자리표시자로 대신한다."""
+    data = images.get(image.get("data-image-key"))
+    if data:
+        try:
+            picture = document.add_picture(BytesIO(data))
+            max_width = Mm(_MAX_IMAGE_WIDTH_MM)
+            if picture.width > max_width:
+                ratio = max_width / picture.width
+                picture.width = max_width
+                picture.height = int(picture.height * ratio)
+            return
+        except Exception:
+            pass  # 깨진 이미지 등 - 아래 자리표시자로 대신한다.
     attachment = image.find("ri:attachment", namespaces={"ri": _RI_NS})
     filename = attachment.get(f"{{{_RI_NS}}}filename") if attachment is not None else None
     note = document.add_paragraph(f"[이미지: {filename}]" if filename else "[이미지]")
@@ -1441,13 +1579,17 @@ def convert_confluence_url_to_docx(
     title = page.get("title") or url
     root = _parse_storage(storage_html)
 
+    say("이미지 가져오는 중...")
+    images: dict = {}
+    _fetch_images_for_page(root, base_url, effective_token, page_id, images)
+
     say("연결된 하위 페이지 포함 중...")
     space = (page.get("space") or {}).get("key")
-    link_ctx = _LinkContext(base_url, effective_token, space, page_id)
+    link_ctx = _LinkContext(base_url, effective_token, space, page_id, images)
     _resolve_linked_pages(root, link_ctx, page_id, depth=0)
 
     say("Word 문서 생성 중...")
-    data = _render_document(title, root)
+    data = _render_document(title, root, images)
     say("완료")
     return data, _safe_filename(title)
 
