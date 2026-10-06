@@ -215,6 +215,54 @@ class MailerTest(unittest.TestCase):
         ):
             send_report_email("someone@example.com", subject="제목", body_html="<p>본문</p>")
 
+    def test_without_attachments_payload_has_no_attachments_field(self):
+        captured = {}
+
+        def _fake_post(url, headers=None, data=None, **kwargs):
+            captured["payload"] = json.loads(data)
+            return _FakeResponse()
+
+        with mock.patch.dict("os.environ", FULL_CONFIG, clear=True), mock.patch(
+            "confluence_agenda.mailer.requests.post", side_effect=_fake_post
+        ):
+            send_report_email("someone@example.com", subject="제목", body_html="<p>본문</p>")
+
+        self.assertNotIn("attachments", captured["payload"])
+
+    def test_attachments_are_base64_encoded_in_payload(self):
+        captured = {}
+
+        def _fake_post(url, headers=None, data=None, **kwargs):
+            captured["payload"] = json.loads(data)
+            return _FakeResponse()
+
+        with mock.patch.dict("os.environ", FULL_CONFIG, clear=True), mock.patch(
+            "confluence_agenda.mailer.requests.post", side_effect=_fake_post
+        ):
+            send_report_email(
+                "someone@example.com",
+                subject="제목",
+                body_html="<p>본문</p>",
+                attachments=[
+                    {
+                        "filename": "회의록.docx",
+                        "content": b"docx-bytes",
+                        "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    }
+                ],
+            )
+
+        attachments = captured["payload"]["attachments"]
+        self.assertEqual(len(attachments), 1)
+        self.assertEqual(attachments[0]["fileName"], "회의록.docx")
+        self.assertEqual(
+            attachments[0]["contentType"],
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        import base64
+
+        self.assertEqual(base64.b64decode(attachments[0]["data"]), b"docx-bytes")
+
 
 if __name__ == "__main__":
     unittest.main()

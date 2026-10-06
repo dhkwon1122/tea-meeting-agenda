@@ -14,6 +14,7 @@ from confluence_agenda.web.docx_export import (
     DocxExportUnavailable,
     convert_confluence_url_to_docx,
     diagnose_connection,
+    docx_bytes_to_preview_html,
     is_feature_available,
     resolve_token,
     verify_token,
@@ -1042,6 +1043,51 @@ class DocumentStyleConfigurationTest(unittest.TestCase):
         data_run = table.cell(1, 0).paragraphs[0].runs[0]
         self.assertEqual(data_run.font.size, Pt(10))
         self.assertFalse(data_run.bold)
+
+
+class DocxBytesToPreviewHtmlTest(unittest.TestCase):
+    """다운로드 없이 보는 미리보기(docx_bytes_to_preview_html)를 확인한다 -
+    이미 만들어진 .docx를 다시 읽어서 HTML로 바꾸므로, 다운로드할 파일과
+    내용이 같은지를 검증하는 셈이다."""
+
+    def setUp(self):
+        self._env_patch = mock.patch.dict(
+            os.environ, {"CONFLUENCE_URL": "https://wiki.example.com"}, clear=True
+        )
+        self._env_patch.start()
+        self.addCleanup(self._env_patch.stop)
+
+    def _convert(self, storage_html: str, *, title: str = "테스트 문서") -> bytes:
+        resp = _page_response(storage_html, title=title)
+        with mock.patch("requests.get", return_value=resp):
+            data, _ = convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+        return data
+
+    def test_title_and_marker_and_text_all_appear(self):
+        data = self._convert("<h2>소제목</h2><p>본문</p>", title="회의록")
+        preview = docx_bytes_to_preview_html(data)
+        self.assertIn("회의록", preview)
+        self.assertIn("1.", preview)
+        self.assertIn("소제목", preview)
+        self.assertIn("본문", preview)
+
+    def test_bold_run_becomes_strong_tag(self):
+        data = self._convert("<p>일반 <strong>굵게</strong> 텍스트</p>")
+        preview = docx_bytes_to_preview_html(data)
+        self.assertIn("<strong>굵게</strong>", preview)
+
+    def test_table_cells_become_html_table(self):
+        storage = "<table><tbody><tr><th>이름</th></tr><tr><td>권동혁</td></tr></tbody></table>"
+        data = self._convert(storage)
+        preview = docx_bytes_to_preview_html(data)
+        self.assertIn("<table", preview)
+        self.assertIn("권동혁", preview)
+
+    def test_html_special_characters_are_escaped(self):
+        data = self._convert("<p>&lt;script&gt;가 아니라 글자 그대로</p>")
+        preview = docx_bytes_to_preview_html(data)
+        self.assertNotIn("<script>", preview)
+        self.assertIn("&lt;script&gt;", preview)
 
 
 if __name__ == "__main__":

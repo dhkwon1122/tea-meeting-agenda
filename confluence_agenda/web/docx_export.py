@@ -74,6 +74,7 @@ CONFLUENCE_DATA_CLASSIFICATION) - 전부 .env.example 참고.
 from __future__ import annotations
 
 import base64
+import html
 import os
 import re
 from io import BytesIO
@@ -89,6 +90,8 @@ try:
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.oxml.ns import qn
     from docx.shared import Mm, Pt
+    from docx.table import Table as DocxTable
+    from docx.text.paragraph import Paragraph as DocxParagraph
     from lxml import etree
 except ImportError:  # python-docx/lxml 미설치 - 이 기능만 비활성화된다.
     DocxDocument = None
@@ -96,6 +99,8 @@ except ImportError:  # python-docx/lxml 미설치 - 이 기능만 비활성화�
     qn = None
     Mm = None
     Pt = None
+    DocxTable = None
+    DocxParagraph = None
     etree = None
 
 # Confluence storage format이 쓰는 매크로/리소스 네임스페이스. REST API가 주는
@@ -1360,3 +1365,76 @@ def convert_confluence_url_to_docx(
     data = _render_document(title, root)
     say("완료")
     return data, _safe_filename(title)
+
+
+# ── 다운로드 없이 미리보기 ───────────────────────────────────────────────
+#
+# 이미 만든 .docx 바이트를 그대로 다시 읽어서 HTML로 바꾼다 - storage
+# XHTML을 처음부터 다시 렌더링하는 별도 경로를 만들면 두 렌더러가 서로
+# 어긋날 수 있어서, 대신 "다운로드할 그 파일"을 python-docx로 읽어 보여주는
+# 쪽을 택했다(내용은 100% 같고, 글꼴·간격 등 미세한 모양만 CSS로 대략
+# 근사한다 - 정확한 모양 확인은 다운로드해서 직접 열어야 한다).
+
+
+def _emu_to_mm(value) -> float:
+    return round(value / 36000, 2) if value is not None else 0.0
+
+
+def _preview_run_html(run) -> str:
+    text = html.escape(run.text or "").replace("\t", "&emsp;")
+    if not text:
+        return ""
+    if run.bold:
+        text = f"<strong>{text}</strong>"
+    if run.italic:
+        text = f"<em>{text}</em>"
+    if run.underline:
+        text = f"<u>{text}</u>"
+    return text
+
+
+def _preview_paragraph_html(paragraph) -> str:
+    runs_html = "".join(_preview_run_html(run) for run in paragraph.runs)
+    style_name = paragraph.style.name if paragraph.style is not None else ""
+    classes = ["docx-p"]
+    styles = []
+    if style_name == "Title":
+        classes.append("docx-title")
+    elif style_name.startswith("Heading"):
+        classes.append("docx-heading")
+    indent_mm = _emu_to_mm(paragraph.paragraph_format.left_indent)
+    if indent_mm:
+        styles.append(f"padding-left:{indent_mm}mm")
+    alignment = paragraph.alignment
+    if alignment is not None and "CENTER" in str(alignment):
+        styles.append("text-align:center")
+    style_attr = f' style="{";".join(styles)}"' if styles else ""
+    return f'<p class="{" ".join(classes)}"{style_attr}>{runs_html or "&nbsp;"}</p>'
+
+
+def _preview_table_html(table) -> str:
+    rows_html = []
+    for row in table.rows:
+        cells_html = "".join(
+            "<td>"
+            + ("".join(_preview_run_html(run) for p in cell.paragraphs for run in p.runs) or "&nbsp;")
+            + "</td>"
+            for cell in row.cells
+        )
+        rows_html.append(f"<tr>{cells_html}</tr>")
+    return '<table class="docx-table">' + "".join(rows_html) + "</table>"
+
+
+def docx_bytes_to_preview_html(data: bytes) -> str:
+    """변환된 .docx를 다운로드하지 않고 화면에서 바로 확인할 수 있게 간단한
+    HTML 조각으로 바꾼다("이 내용이 맞는지" 확인하는 용도 - 픽셀 단위로
+    똑같지는 않다)."""
+    document = DocxDocument(BytesIO(data))
+    parts = ['<div class="docx-preview">']
+    for child in document.element.body:
+        if child.tag == qn("w:p"):
+            parts.append(_preview_paragraph_html(DocxParagraph(child, document._body)))
+        elif child.tag == qn("w:tbl"):
+            parts.append(_preview_table_html(DocxTable(child, document._body)))
+    parts.append("</div>")
+    return "\n".join(parts)

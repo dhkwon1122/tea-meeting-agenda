@@ -7,6 +7,7 @@ from unittest import mock
 from urllib.parse import unquote
 
 from confluence_agenda.builder import build_email_subject
+from confluence_agenda.mailer import MailConfigError
 from confluence_agenda.web import auth, confluence_credentials
 from confluence_agenda.web.app import app, main
 from confluence_agenda.web.docx_export import DocxExportUnavailable
@@ -362,6 +363,107 @@ class ConfluenceDocxAndPatTest(unittest.TestCase):
 
     def test_confluence_to_docx_status_of_unknown_job_returns_404(self):
         resp = self.client.get("/confluence-to-docx/status/not-a-real-job")
+        self.assertEqual(resp.status_code, 404)
+
+    def _finish_job(self, storage_html="<h2>소제목</h2><p>본문</p>", title="회의록"):
+        """변환이 끝난(job["status"]=="done") job_id를 돌려준다 - 미리보기/메일
+        테스트가 공통으로 쓰는 준비 단계."""
+        env = {"CONFLUENCE_API_TOKEN": "global-token"}
+
+        def fake_convert(url, *, token, on_progress=None):
+            from confluence_agenda.web.docx_export import _render_document, _parse_storage
+
+            data = _render_document(title, _parse_storage(storage_html))
+            return data, f"{title}.docx"
+
+        with mock.patch.dict("os.environ", env, clear=True), mock.patch(
+            "confluence_agenda.web.app.convert_confluence_url_to_docx", side_effect=fake_convert
+        ):
+            start_resp = self.client.post(
+                "/confluence-to-docx/start",
+                data={"confluence_url": "https://wiki.example.com/pages/123"},
+            )
+            job_id = start_resp.get_json()["job_id"]
+            self._poll_job_until_finished(job_id)
+        return job_id
+
+    def test_confluence_to_docx_preview_shows_content_without_downloading(self):
+        job_id = self._finish_job()
+        resp = self.client.get(f"/confluence-to-docx/preview/{job_id}")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_data(as_text=True)
+        self.assertIn("소제목", body)
+        self.assertIn("본문", body)
+        self.assertIn(f"/confluence-to-docx/download/{job_id}", body)
+
+    def test_confluence_to_docx_preview_of_unknown_job_redirects_with_error(self):
+        resp = self.client.get("/confluence-to-docx/preview/not-a-real-job", follow_redirects=False)
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("docx_error=", resp.headers["Location"])
+
+    def test_confluence_to_docx_download_can_be_repeated_after_preview(self):
+        # 미리보기/다운로드/메일 중 하나를 했다고 나머지가 못 쓰게 되면 안 된다
+        # (예전에는 다운로드 한 번으로 job을 지워버렸음).
+        job_id = self._finish_job()
+        self.client.get(f"/confluence-to-docx/preview/{job_id}")
+        first = self.client.get(f"/confluence-to-docx/download/{job_id}")
+        second = self.client.get(f"/confluence-to-docx/download/{job_id}")
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(first.data, second.data)
+
+    def test_confluence_to_docx_email_without_address_returns_error(self):
+        job_id = self._finish_job()
+        with mock.patch.dict("os.environ", {"MAIL_API_TOKEN": "t"}, clear=False):
+            resp = self.client.post(f"/confluence-to-docx/email/{job_id}", data={"email_to": ""})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("이메일", resp.get_json()["error"])
+
+    def test_confluence_to_docx_email_when_mail_not_configured_returns_error(self):
+        job_id = self._finish_job()
+        with mock.patch.dict("os.environ", {}, clear=True):
+            resp = self.client.post(
+                f"/confluence-to-docx/email/{job_id}", data={"email_to": "a@example.com"}
+            )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("MAIL_API_TOKEN", resp.get_json()["error"])
+
+    def test_confluence_to_docx_email_sends_docx_bytes_as_attachment(self):
+        job_id = self._finish_job(title="회의록")
+        with mock.patch.dict("os.environ", {"MAIL_API_TOKEN": "t"}, clear=False), mock.patch(
+            "confluence_agenda.web.app.send_report_email"
+        ) as fake_send:
+            resp = self.client.post(
+                f"/confluence-to-docx/email/{job_id}", data={"email_to": "a@example.com"}
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("a@example.com", resp.get_json()["message"])
+        fake_send.assert_called_once()
+        args, kwargs = fake_send.call_args
+        self.assertEqual(args[0], "a@example.com")
+        attachments = kwargs["attachments"]
+        self.assertEqual(len(attachments), 1)
+        self.assertEqual(attachments[0]["filename"], "회의록.docx")
+        self.assertTrue(attachments[0]["content"])
+
+    def test_confluence_to_docx_email_failure_is_reported(self):
+        job_id = self._finish_job()
+        with mock.patch.dict("os.environ", {"MAIL_API_TOKEN": "t"}, clear=False), mock.patch(
+            "confluence_agenda.web.app.send_report_email",
+            side_effect=MailConfigError("메일 API 호출 실패"),
+        ):
+            resp = self.client.post(
+                f"/confluence-to-docx/email/{job_id}", data={"email_to": "a@example.com"}
+            )
+
+        self.assertEqual(resp.status_code, 502)
+        self.assertIn("메일 API 호출 실패", resp.get_json()["error"])
+
+    def test_confluence_to_docx_email_of_unknown_job_returns_404(self):
+        resp = self.client.post(
+            "/confluence-to-docx/email/not-a-real-job", data={"email_to": "a@example.com"}
+        )
         self.assertEqual(resp.status_code, 404)
 
     def test_save_confluence_pat_requires_login(self):

@@ -16,14 +16,18 @@ userId 쿼리 파라미터도 requests의 params= kwarg로 넘기면 API가 못
 파라미터를 못 찾아 오류가 난다.
 
 MAIL_API_TOKEN이 설정된 경우에만 동작한다.
+
+send_report_email()의 attachments 인자(파일 첨부)는 추측으로 구현한
+것이다 - 자세한 내용은 그 함수의 docstring 참고.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
-from typing import Sequence, Union
+from typing import Optional, Sequence, Union
 from urllib.parse import quote
 
 import requests
@@ -61,7 +65,13 @@ def _require_env(name: str) -> str:
     return value
 
 
-def send_report_email(to: Union[str, Sequence[str]], subject: str, body_html: str) -> None:
+def send_report_email(
+    to: Union[str, Sequence[str]],
+    subject: str,
+    body_html: str,
+    *,
+    attachments: Optional[Sequence[dict]] = None,
+) -> None:
     """body_html(HTML)을 to(문자열 하나 또는 이메일 주소 목록)에 보낸다.
 
     문자열 하나를 넘기면 수신자 한 명, 목록을 넘기면 한 통의 메일을
@@ -71,6 +81,15 @@ def send_report_email(to: Union[str, Sequence[str]], subject: str, body_html: st
     MailConfigError를 던진다. 호출 자체가 실패해도(네트워크 오류, 4xx/5xx
     응답) 원인을 그대로 담아 MailConfigError로 감싸서 던진다 - 호출자가
     화면에 실패 사유를 보여줄 수 있도록.
+
+    attachments는 [{"filename": str, "content": bytes, "content_type": str}, ...]
+    형태 - 지금까지 이 메일 API는 본문 HTML만 보내는 용도로만 써 봤고
+    (이 저장소도, 참고한 dhkwon1122/ai-friendly-doc도 마찬가지), 첨부파일을
+    실제로 지원하는지는 확인된 적이 없다. 아래 "attachments" JSON 필드명/
+    구조(base64 인코딩)는 추측이다 - 실패하면(특히 요청 형식 오류) 이 함수가
+    던지는 MailConfigError에 응답 본문이 그대로 담기니, 그 내용을 보고
+    실제 스펙에 맞게 필드명/구조를 고쳐야 한다(Confluence Dep-Ticket 헤더를
+    찾아낼 때처럼).
     """
     to_emails = [to] if isinstance(to, str) else list(to)
     if not to_emails:
@@ -103,6 +122,15 @@ def send_report_email(to: Union[str, Sequence[str]], subject: str, body_html: st
         "sender": {"emailAddress": sender_address},
         "recipients": [{"emailAddress": addr, "recipientType": "TO"} for addr in to_emails],
     }
+    if attachments:
+        mail_payload["attachments"] = [
+            {
+                "fileName": attachment["filename"],
+                "contentType": attachment.get("content_type", "application/octet-stream"),
+                "data": base64.b64encode(attachment["content"]).decode("ascii"),
+            }
+            for attachment in attachments
+        ]
     # 한글이 섞이므로 인코딩을 명시적으로 UTF-8 바이트로 고정한다 (str로
     # 넘기면 라이브러리가 기본 인코딩을 쓸 수 있어서 깨질 수 있다).
     body = json.dumps(mail_payload, ensure_ascii=False).encode("utf-8")

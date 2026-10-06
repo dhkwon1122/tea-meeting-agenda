@@ -12,6 +12,7 @@ CLI(confluence_agenda.cli)와 로직은 동일하고, 입력 방식만 다르다
 
 from __future__ import annotations
 
+import html
 import io
 import os
 import threading
@@ -34,6 +35,7 @@ from .contacts import load_preset_contacts
 from .diagram import build_macro_diagram_html
 from .docx_export import DocxExportUnavailable, convert_confluence_url_to_docx
 from .docx_export import diagnose_connection as diagnose_confluence_connection
+from .docx_export import docx_bytes_to_preview_html
 from .docx_export import is_feature_available as docx_export_configured
 from .docx_export import resolve_token as resolve_confluence_token
 from .docx_export import verify_token as verify_confluence_token
@@ -147,6 +149,19 @@ _APP_STYLE = """
   button.primary:hover { background: var(--blue-dark); }
   button.secondary { background: var(--surface); color: var(--blue); border-color: var(--border); }
   button.secondary:hover { background: var(--blue-tint); border-color: var(--blue); }
+
+  /* 버튼처럼 보이는 링크(<a>) - 다운로드/미리보기처럼 새 탭/다른 URL로 보내는
+     동작은 버튼보다 링크가 더 맞아서, button.primary/secondary와 같은
+     모양을 <a>에도 쓸 수 있게 별도 클래스로 둔다. */
+  .btn-primary, .btn-secondary {
+    display: inline-flex; align-items: center; text-decoration: none;
+    font-family: inherit; font-size: 0.9rem; font-weight: 500; border-radius: 20px;
+    padding: 10px 22px; cursor: pointer; border: 1px solid transparent; transition: all .15s;
+  }
+  .btn-primary { background: var(--blue); color: #fff; }
+  .btn-primary:hover { background: var(--blue-dark); }
+  .btn-secondary { background: var(--surface); color: var(--blue); border-color: var(--border); }
+  .btn-secondary:hover { background: var(--blue-tint); border-color: var(--blue); }
 
   .message {
     padding: 12px 16px; border-radius: 8px; margin-bottom: 20px; font-size: 0.88rem;
@@ -381,9 +396,23 @@ CONFLUENCE_DOCX_PAGE_TEMPLATE = """
         <input type="text" id="confluence_url" name="confluence_url"
                placeholder="https://wiki.사내주소/pages/viewpage.action?pageId=123456">
       </div>
-      <button class="primary" type="submit" id="convert-submit">Word로 변환해서 받기</button>
+      <button class="primary" type="submit" id="convert-submit">Word로 변환하기</button>
       <p id="convert-progress" class="subtitle" style="margin:12px 0 0; display:none;"></p>
     </form>
+
+    <div id="convert-result" style="display:none; margin-top:18px; padding-top:18px; border-top:1px solid var(--border);">
+      <div style="display:flex; gap:10px; flex-wrap:wrap;">
+        <a id="result-download" class="btn-primary" href="#">다운로드</a>
+        <a id="result-preview" class="btn-secondary" href="#" target="_blank">다운로드 없이 미리보기</a>
+      </div>
+      {% if mail_configured %}
+      <form id="email-form" style="display:flex; gap:8px; margin-top:12px;">
+        <input type="email" id="email_to" placeholder="메일로 받을 사람 이메일" style="flex:1;" required>
+        <button class="secondary" type="submit">메일로 보내기</button>
+      </form>
+      <p id="email-result" class="subtitle" style="margin:8px 0 0; display:none;"></p>
+      {% endif %}
+    </div>
   </div>
 </div>
 
@@ -392,6 +421,11 @@ CONFLUENCE_DOCX_PAGE_TEMPLATE = """
     var form = document.getElementById('convert-form');
     var submitBtn = document.getElementById('convert-submit');
     var progressEl = document.getElementById('convert-progress');
+    var resultEl = document.getElementById('convert-result');
+    var downloadLink = document.getElementById('result-download');
+    var previewLink = document.getElementById('result-preview');
+    var emailForm = document.getElementById('email-form');
+    var emailResultEl = document.getElementById('email-result');
 
     function showProgress(text) {
       progressEl.textContent = text;
@@ -401,6 +435,7 @@ CONFLUENCE_DOCX_PAGE_TEMPLATE = """
     form.addEventListener('submit', function (ev) {
       ev.preventDefault();
       submitBtn.disabled = true;
+      resultEl.style.display = 'none';
       showProgress('시작하는 중...');
 
       fetch('/confluence-to-docx/start', { method: 'POST', body: new FormData(form) })
@@ -428,8 +463,26 @@ CONFLUENCE_DOCX_PAGE_TEMPLATE = """
             showProgress(status.message);
             setTimeout(function () { poll(jobId); }, 800);
           } else if (status.status === 'done') {
-            showProgress('완료 - 다운로드를 시작합니다.');
-            window.location = '/confluence-to-docx/download/' + jobId;
+            showProgress('완료');
+            downloadLink.href = '/confluence-to-docx/download/' + jobId;
+            previewLink.href = '/confluence-to-docx/preview/' + jobId;
+            if (emailForm) {
+              emailForm.onsubmit = function (ev) {
+                ev.preventDefault();
+                emailResultEl.textContent = '보내는 중...';
+                emailResultEl.style.display = 'block';
+                var body = new FormData();
+                body.append('email_to', document.getElementById('email_to').value);
+                fetch('/confluence-to-docx/email/' + jobId, { method: 'POST', body: body })
+                  .then(function (resp) { return resp.json().then(function (b) { return [resp.ok, b]; }); })
+                  .then(function (result) {
+                    var ok = result[0], b = result[1];
+                    emailResultEl.textContent = ok ? b.message : (b.error || '메일 발송에 실패했습니다.');
+                  })
+                  .catch(function (err) { emailResultEl.textContent = '요청 실패: ' + err; });
+              };
+            }
+            resultEl.style.display = 'block';
             submitBtn.disabled = false;
           } else {
             showProgress(status.message || '변환에 실패했습니다.');
@@ -443,6 +496,44 @@ CONFLUENCE_DOCX_PAGE_TEMPLATE = """
     }
   })();
 </script>
+</body>
+</html>
+"""
+
+CONFLUENCE_DOCX_PREVIEW_TEMPLATE = """
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>미리보기 - {{ filename }}</title>
+<style>""" + _APP_STYLE + """
+  .docx-preview {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 32px; font-size: 0.95rem; line-height: 1.5; color: var(--text);
+  }
+  .docx-preview .docx-title { font-size: 1.3rem; font-weight: 700; text-align: center;
+    text-decoration: underline; margin: 0 0 16px; }
+  .docx-preview .docx-heading { font-weight: 700; }
+  .docx-preview .docx-p { margin: 2px 0; }
+  .docx-table { border-collapse: collapse; width: 100%; margin: 10px 0; }
+  .docx-table td { border: 1px solid var(--border); padding: 6px 10px; font-size: 0.85rem; text-align: center; }
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <h1>미리보기</h1>
+    <p class="subtitle">
+      {{ filename }}
+      <a class="back-link" href="/confluence-to-docx">← 변환기로 돌아가기</a>
+    </p>
+  </header>
+  <div style="margin-bottom:16px;">
+    <a class="btn-primary" href="/confluence-to-docx/download/{{ job_id }}">다운로드</a>
+  </div>
+  {{ preview_html | safe }}
+</div>
 </body>
 </html>
 """
@@ -547,6 +638,7 @@ def confluence_docx_page():
         confluence_pat_registered=pat_registered,
         docx_error=request.args.get("docx_error"),
         docx_message=request.args.get("docx_message"),
+        mail_configured=is_mail_configured(),
     )
 
 
@@ -621,15 +713,20 @@ def confluence_to_docx_status(job_id):
     return {"status": job["status"], "message": job["message"]}
 
 
-@app.route("/confluence-to-docx/download/<job_id>")
-def confluence_to_docx_download(job_id):
+def _get_done_job(job_id: str) -> Optional[dict]:
+    # 다운로드/미리보기/메일 세 가지가 전부 같은 job의 data를 쓸 수 있어야
+    # 해서(어느 하나를 했다고 나머지가 못 쓰게 되면 안 됨) 받는다고 바로
+    # 지우지 않는다 - 대신 _JOB_TTL(15분)이 지나면 다음 /start 호출에서
+    # 치워진다.
     with _conversion_jobs_lock:
         job = _conversion_jobs.get(job_id)
-        if job is not None and job["status"] == "done":
-            # 한 번 받으면 정리 - 토큰이 든 작업을 메모리에 계속 남겨둘 필요 없음.
-            _conversion_jobs.pop(job_id, None)
+        return dict(job) if job is not None and job["status"] == "done" else None
 
-    if job is None or job["status"] != "done":
+
+@app.route("/confluence-to-docx/download/<job_id>")
+def confluence_to_docx_download(job_id):
+    job = _get_done_job(job_id)
+    if job is None:
         return redirect(
             f"/confluence-to-docx?docx_error={quote('파일을 찾을 수 없습니다(만료되었을 수 있음) - 다시 시도해주세요.')}"
         )
@@ -640,6 +737,55 @@ def confluence_to_docx_download(job_id):
         download_name=job["filename"],
         mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
+
+
+@app.route("/confluence-to-docx/preview/<job_id>")
+def confluence_to_docx_preview(job_id):
+    job = _get_done_job(job_id)
+    if job is None:
+        return redirect(
+            f"/confluence-to-docx?docx_error={quote('파일을 찾을 수 없습니다(만료되었을 수 있음) - 다시 시도해주세요.')}"
+        )
+
+    return render_template_string(
+        CONFLUENCE_DOCX_PREVIEW_TEMPLATE,
+        filename=job["filename"],
+        job_id=job_id,
+        preview_html=docx_bytes_to_preview_html(job["data"]),
+    )
+
+
+@app.route("/confluence-to-docx/email/<job_id>", methods=["POST"])
+def confluence_to_docx_email(job_id):
+    job = _get_done_job(job_id)
+    if job is None:
+        return {"error": "파일을 찾을 수 없습니다(만료되었을 수 있음) - 다시 시도해주세요."}, 404
+
+    to_email = (request.form.get("email_to") or "").strip()
+    if not to_email:
+        return {"error": "받을 사람 이메일을 입력해주세요."}, 400
+    if not is_mail_configured():
+        return {"error": "MAIL_API_TOKEN 등 메일 API 환경변수가 설정되지 않아 메일을 보낼 수 없습니다."}, 400
+
+    try:
+        send_report_email(
+            to_email,
+            subject=f"[Word 변환] {job['filename']}",
+            body_html=f"<p>요청하신 Confluence 변환 결과(\"{html.escape(job['filename'])}\")를 첨부했습니다.</p>",
+            attachments=[
+                {
+                    "filename": job["filename"],
+                    "content": job["data"],
+                    "content_type": (
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    ),
+                }
+            ],
+        )
+    except MailConfigError as e:
+        return {"error": f"메일 발송 실패: {e}"}, 502
+
+    return {"message": f"{to_email} 로 메일을 보냈습니다."}
 
 
 @app.route("/confluence-pat", methods=["POST"])
