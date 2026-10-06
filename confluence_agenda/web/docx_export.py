@@ -244,6 +244,19 @@ def _wrap_connection_error(exc: Exception) -> RuntimeError:
     문제인 것"을 구분해 다음에 뭘 확인해야 하는지 바로 알 수 있게 한다.
     """
     if isinstance(exc, requests.exceptions.SSLError):
+        if "WRONG_VERSION_NUMBER" in str(exc):
+            # 인증서 신뢰 문제가 아니다 - TLS가 아닌 응답을 받았다는 뜻으로,
+            # https://로 접속했는데 그 주소/포트가 실제로는 http만 쓰는 경우에
+            # 정확히 이 에러가 난다(dhkwon1122/Researcher-board가 겪은 최종
+            # 원인도 CONFLUENCE_GATEWAY_BASE_URL의 http/https 스킴 오타였다).
+            return RuntimeError(
+                f"Confluence 서버 연결 실패(SSL 프로토콜 불일치): {exc}\n"
+                "이건 인증서를 못 믿는 게 아니라 'TLS가 아닌 응답을 받았다'는 뜻입니다 - "
+                "CONFLUENCE_URL이 https://로 시작하는데 실제 그 주소/포트는 http만 "
+                "쓰는 경우에 정확히 이렇게 납니다. CONFLUENCE_URL의 스킴(http vs "
+                "https)과 포트 번호를 IT/보안팀이 안내한 값과 한 글자도 다르지 않게 "
+                "다시 확인하세요 - 둘 다 맞다면 http://로 한번 바꿔서 시도해보세요."
+            )
         verify = _ssl_verify()
         if verify is True:
             hint = (

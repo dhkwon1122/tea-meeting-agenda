@@ -236,6 +236,26 @@ class ConvertConfluenceUrlToDocxHttpTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Confluence 서버 연결 실패"):
                 convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
 
+    def test_ssl_error_wrong_version_number_hints_at_scheme_port_mismatch(self):
+        """[SSL: WRONG_VERSION_NUMBER]는 인증서 신뢰 문제가 아니라 https://로
+        접속했는데 그 주소/포트가 실제로는 http만 쓴다는 신호다(Researcher-board의
+        최종 확정 원인도 게이트웨이 URL의 스킴 오타였음) - 인증서 관련 안내가
+        아니라 스킴/포트를 확인하라는 안내가 나와야 한다."""
+        import requests as requests_module
+
+        with mock.patch(
+            "requests.get",
+            side_effect=requests_module.exceptions.SSLError(
+                "SSLError(1, '[SSL: WRONG_VERSION_NUMBER] wrong version number (_ssl.c:1016)')"
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "스킴") as ctx:
+                convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+        message = str(ctx.exception)
+        self.assertIn("TLS가 아닌 응답", message)
+        self.assertNotIn("PEM", message)  # 인증서 신뢰 문제용 안내가 섞여 나오면 안 됨
+
     def test_ssl_error_with_default_verify_hints_at_untrusted_corp_ca(self):
         """CONFLUENCE_CA_BUNDLE 없이(= 기본 인증서로) SSLError가 나면, 사내 루트 CA가
         신뢰 저장소에 없다는 것과 certs/의 PEM 형식·재빌드 여부를 확인하라는
