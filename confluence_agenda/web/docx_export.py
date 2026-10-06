@@ -29,6 +29,14 @@ CONFLUENCE_USERNAME을 안 채우면 Authorization: Bearer <토큰>으로 보낸
      못 걸러낸다).
   2. 전역 CONFLUENCE_API_TOKEN 환경변수 - 사용자별 등록이 없을 때 fallback
      (로그인 기능을 안 쓰는 배포, 또는 CLI 전용 사용 등).
+
+사내 API 게이트웨이를 거쳐야 하는 환경이면 _request_headers()가 추가로
+처리한다(dhkwon1122/Researcher-board의 pipeline/confluence_client.py가 같은
+사내 Confluence를 대상으로 실측해 둔 것 참고): requests 기본 User-Agent를
+WAF가 스크립트로 식별해 연결을 끊는 문제(CONFLUENCE_USER_AGENT로 curl 스타일
+기본값), Authorization 외 다른 헤더명/스킴 요구(CONFLUENCE_AUTH_HEADER/
+CONFLUENCE_AUTH_SCHEME), 게이트웨이 전용 보안 헤더(CONFLUENCE_DEP_TICKET/
+CONFLUENCE_DATA_CLASSIFICATION) - 전부 .env.example 참고.
 """
 
 from __future__ import annotations
@@ -122,12 +130,65 @@ def _normalize_base_url(url: str) -> str:
     return _REST_API_SUFFIX.sub("", url.rstrip("/"))
 
 
-def _auth_headers(token: str) -> dict:
+def _auth_header(token: str) -> tuple:
+    """(헤더 이름, 헤더 값). 기본은 표준 "Authorization: Bearer <토큰>"(Server/DC
+    PAT)이지만, 사내 API 게이트웨이가 다른 헤더명/스킴을 요구하면 CONFLUENCE_AUTH_HEADER/
+    CONFLUENCE_AUTH_SCHEME로 바꿀 수 있다(dhkwon1122/Researcher-board의
+    pipeline/confluence_client.py::_auth_header()가 같은 사내망에서 실측해 쓰는 방식).
+    CONFLUENCE_AUTH_SCHEME을 빈 문자열로 두면 스킴 접두사 없이 토큰 값만 그대로 싣는다.
+
+    CONFLUENCE_USERNAME이 설정돼 있으면(Cloud) 이 커스터마이징과 무관하게 Basic
+    인증(이메일+API 토큰)으로 보낸다 - 사내 Server/DC 환경에서는 이 값을 비워둬야 한다."""
     username = os.environ.get("CONFLUENCE_USERNAME", "").strip()
     if username:
         basic = base64.b64encode(f"{username}:{token}".encode()).decode()
-        return {"Authorization": f"Basic {basic}"}  # Cloud: 이메일 + API 토큰
-    return {"Authorization": f"Bearer {token}"}  # Server/Data Center: PAT
+        return "Authorization", f"Basic {basic}"
+
+    header_name = os.environ.get("CONFLUENCE_AUTH_HEADER", "").strip() or "Authorization"
+    scheme = os.environ.get("CONFLUENCE_AUTH_SCHEME", "Bearer").strip()
+    value = f"{scheme} {token}" if scheme else token
+    return header_name, value
+
+
+def _gateway_headers() -> dict:
+    """사내 API 게이트웨이가 REST 호출에 추가로 요구하는 보안 정책 헤더
+    (dhkwon1122/Researcher-board의 _extra_headers()와 같은 사내 게이트웨이 대상 -
+    표준 Confluence API 스펙이 아니라 사내 정책 헤더라 값이 없으면 보내지 않는다).
+    헤더 "이름" 자체도 .env로 바꿀 수 있다 - 게이트웨이가 요구하는 정확한 헤더명이
+    CONFLUENCE_DEP_TICKET_HEADER/CONFLUENCE_DATA_CLASSIFICATION_HEADER 기본값과
+    한 글자라도 다르면 게이트웨이가 못 알아보고 인증 실패로 처리할 수 있다."""
+    headers = {}
+    dep_ticket = os.environ.get("CONFLUENCE_DEP_TICKET", "").strip()
+    if dep_ticket:
+        header_name = os.environ.get("CONFLUENCE_DEP_TICKET_HEADER", "").strip() or "X-Dep-Ticket"
+        headers[header_name] = dep_ticket
+    data_classification = os.environ.get("CONFLUENCE_DATA_CLASSIFICATION", "").strip()
+    if data_classification:
+        header_name = (
+            os.environ.get("CONFLUENCE_DATA_CLASSIFICATION_HEADER", "").strip()
+            or "X-Data-Classification"
+        )
+        headers[header_name] = data_classification
+    return headers
+
+
+def _request_headers(token: str) -> dict:
+    headers = _gateway_headers()
+    auth_name, auth_value = _auth_header(token)
+    headers[auth_name] = auth_value
+    # Accept: application/json - 사내 게이트웨이가 인증 실패 응답을 JSON이 아니라
+    # XML로 내려줄 때가 있어(클라이언트가 원하는 형식을 안 밝히면 게이트웨이
+    # 기본값으로 응답하는 경우가 흔함), 에러 응답이라도 일관되게 JSON으로 받으려고
+    # 명시한다(Researcher-board에서 실측).
+    headers.setdefault("Accept", "application/json")
+    # User-Agent - 같은 URL/인증 헤더로도 curl은 200인데 requests(기본 UA가
+    # "python-requests/x.y.z"로 스크립트임이 드러남)는 WAF/게이트웨이가 연결을
+    # 끊어버리는 경우가 실제로 있었다(Researcher-board에서 실측, "Remote end
+    # closed connection without response"). curl 스타일 UA를 기본값으로 둔다.
+    headers.setdefault(
+        "User-Agent", os.environ.get("CONFLUENCE_USER_AGENT", "").strip() or "curl/8.0.0"
+    )
+    return headers
 
 
 _CA_BUNDLE_ENV_VARS = ("CONFLUENCE_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE")
@@ -162,7 +223,7 @@ def verify_token(token: str) -> str:
     try:
         resp = requests.get(
             f"{base_url}/rest/api/user/current",
-            headers=_auth_headers(token),
+            headers=_request_headers(token),
             timeout=30,
             verify=_ssl_verify(),
         )
@@ -194,7 +255,7 @@ def _fetch_page(base_url: str, page_id: str, token: str) -> dict:
         resp = requests.get(
             f"{base_url}/rest/api/content/{page_id}",
             params={"expand": "body.storage"},
-            headers=_auth_headers(token),
+            headers=_request_headers(token),
             timeout=30,
             verify=_ssl_verify(),
         )

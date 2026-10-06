@@ -212,6 +212,76 @@ class ConvertConfluenceUrlToDocxHttpTest(unittest.TestCase):
         headers = fake_get.call_args.kwargs["headers"]
         self.assertTrue(headers["Authorization"].startswith("Basic "))
 
+    def test_default_headers_include_accept_json_and_curl_style_user_agent(self):
+        """사내 API 게이트웨이가 requests의 기본 User-Agent("python-requests/x.y.z")를
+        스크립트로 식별해 연결을 끊는 경우가 실측됐다(dhkwon1122/Researcher-board의
+        pipeline/confluence_client.py) - curl 스타일 UA를 기본값으로 보내야 한다."""
+        resp = _page_response("<p>본문</p>")
+        with mock.patch("requests.get", return_value=resp) as fake_get:
+            convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+        headers = fake_get.call_args.kwargs["headers"]
+        self.assertEqual(headers["Accept"], "application/json")
+        self.assertEqual(headers["User-Agent"], "curl/8.0.0")
+
+    def test_user_agent_overridable_via_env(self):
+        with mock.patch.dict(os.environ, {"CONFLUENCE_USER_AGENT": "내사내봇/1.0"}):
+            resp = _page_response("<p>본문</p>")
+            with mock.patch("requests.get", return_value=resp) as fake_get:
+                convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+        self.assertEqual(fake_get.call_args.kwargs["headers"]["User-Agent"], "내사내봇/1.0")
+
+    def test_auth_header_name_and_scheme_overridable_via_env(self):
+        """일부 사내 게이트웨이는 표준 Authorization: Bearer가 아니라 다른 헤더명/스킴을
+        요구할 수 있다(Researcher-board에서 실제로 겪은 사례) - .env로 재배포 없이 바꾼다."""
+        env = {"CONFLUENCE_AUTH_HEADER": "X-Auth-Token", "CONFLUENCE_AUTH_SCHEME": ""}
+        with mock.patch.dict(os.environ, env):
+            resp = _page_response("<p>본문</p>")
+            with mock.patch("requests.get", return_value=resp) as fake_get:
+                convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="my-pat")
+
+        headers = fake_get.call_args.kwargs["headers"]
+        self.assertEqual(headers["X-Auth-Token"], "my-pat")
+        self.assertNotIn("Authorization", headers)
+
+    def test_gateway_dep_ticket_and_data_classification_headers_sent_when_configured(self):
+        env = {
+            "CONFLUENCE_DEP_TICKET": "DEP-1234",
+            "CONFLUENCE_DATA_CLASSIFICATION": "internal",
+        }
+        with mock.patch.dict(os.environ, env):
+            resp = _page_response("<p>본문</p>")
+            with mock.patch("requests.get", return_value=resp) as fake_get:
+                convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+        headers = fake_get.call_args.kwargs["headers"]
+        self.assertEqual(headers["X-Dep-Ticket"], "DEP-1234")
+        self.assertEqual(headers["X-Data-Classification"], "internal")
+
+    def test_gateway_headers_not_sent_when_not_configured(self):
+        resp = _page_response("<p>본문</p>")
+        with mock.patch("requests.get", return_value=resp) as fake_get:
+            convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+        headers = fake_get.call_args.kwargs["headers"]
+        self.assertNotIn("X-Dep-Ticket", headers)
+        self.assertNotIn("X-Data-Classification", headers)
+
+    def test_gateway_header_names_overridable_via_env(self):
+        env = {
+            "CONFLUENCE_DEP_TICKET": "DEP-1234",
+            "CONFLUENCE_DEP_TICKET_HEADER": "X-My-Dep-Ticket",
+        }
+        with mock.patch.dict(os.environ, env):
+            resp = _page_response("<p>본문</p>")
+            with mock.patch("requests.get", return_value=resp) as fake_get:
+                convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+        headers = fake_get.call_args.kwargs["headers"]
+        self.assertEqual(headers["X-My-Dep-Ticket"], "DEP-1234")
+        self.assertNotIn("X-Dep-Ticket", headers)
+
     def test_filename_strips_unsafe_characters_and_adds_docx_extension(self):
         resp = _page_response("<p>본문</p>", title="예산안 승인 / 2026")
         with mock.patch("requests.get", return_value=resp):
