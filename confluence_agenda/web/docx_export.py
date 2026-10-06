@@ -1231,16 +1231,43 @@ def _render_table(document: DocxDocument, table_element: etree._Element) -> None
             docx_cell = table.cell(row_index, col_index)
             if span > 1:
                 docx_cell = docx_cell.merge(table.cell(row_index, col_index + span - 1))
-            paragraph = docx_cell.paragraphs[0]
-            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
             is_header = _local(cell.tag) == "th"
-            _add_inline_runs(paragraph, cell, bold=is_header)
-            for run in paragraph.runs:
-                run.font.size = Pt(10)
-                _set_east_asian_font(run.font, _DOCUMENT_FONT_NAME)
+            _render_cell_content(docx_cell, cell, bold=is_header)
             if is_header:
                 _shade_cell(docx_cell, _TABLE_HEADER_SHADING_HEX)
             col_index += span
+
+
+_CELL_BLOCK_TAGS = ("p", "ul", "ol")
+
+
+def _render_cell_content(docx_cell, source_cell: etree._Element, *, bold: bool) -> None:
+    """표 칸 안의 내용을 채운다 - 칸 안에 <p>가 여러 개면(Confluence 표 칸은
+    흔히 그렇다) 각각 별도 문단으로 넣어야 줄바꿈이 보인다. 예전에는 칸
+    전체를 _add_inline_runs 한 번으로 평문단에 몰아 넣어서, <p> 여러 개가
+    줄바꿈 없이 한 줄로 붙어 버렸다(실제 변환에서 발견된 버그)."""
+    blocks = [child for child in source_cell if _local(child.tag) in _CELL_BLOCK_TAGS]
+    if not blocks:
+        blocks = [source_cell]  # 블록 태그 없이 텍스트/<br/>만 있는 칸 - 기존처럼 한 문단으로.
+
+    # <ul>/<ol>은 중첩 깊이 없이 각 <li>를 그냥 줄 하나로 펼친다(표 칸 안
+    # 목록은 알려진 단순화 범위). 그 외(<p> 등)는 그 자체가 한 문단.
+    paragraph_sources: List[etree._Element] = []
+    for block in blocks:
+        if _local(block.tag) in ("ul", "ol"):
+            paragraph_sources.extend(item for item in block if _local(item.tag) == "li")
+        else:
+            paragraph_sources.append(block)
+    if not paragraph_sources:
+        paragraph_sources = [source_cell]
+
+    for index, source in enumerate(paragraph_sources):
+        paragraph = docx_cell.paragraphs[0] if index == 0 else docx_cell.add_paragraph()
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        _add_inline_runs(paragraph, source, bold=bold)
+        for run in paragraph.runs:
+            run.font.size = Pt(10)
+            _set_east_asian_font(run.font, _DOCUMENT_FONT_NAME)
 
 
 def _int_attr(element: etree._Element, name: str) -> int:

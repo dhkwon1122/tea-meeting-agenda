@@ -520,6 +520,22 @@ class RenderedDocxContentTest(unittest.TestCase):
         self.assertEqual(table.cell(1, 0).text, "권동혁")
         self.assertEqual(table.cell(1, 1).text, "스탭팀장")
 
+    def test_table_cell_with_multiple_paragraphs_keeps_each_on_its_own_line(self):
+        # Confluence 표 칸은 흔히 <p>가 여러 개다 - 예전에는 전부 한 문단으로
+        # 몰아 넣어서 줄바꿈 없이 붙어 버렸다(실제 변환에서 발견된 버그).
+        storage = "<table><tbody><tr><td><p>첫째 줄</p><p>둘째 줄</p></td></tr></tbody></table>"
+        data = self._convert(storage)
+        document = DocxDocument(io.BytesIO(data))
+        cell = document.tables[0].cell(0, 0)
+        self.assertEqual([p.text for p in cell.paragraphs], ["첫째 줄", "둘째 줄"])
+
+    def test_table_cell_with_list_puts_each_item_on_its_own_line(self):
+        storage = "<table><tbody><tr><td><ul><li>항목1</li><li>항목2</li></ul></td></tr></tbody></table>"
+        data = self._convert(storage)
+        document = DocxDocument(io.BytesIO(data))
+        cell = document.tables[0].cell(0, 0)
+        self.assertEqual([p.text for p in cell.paragraphs], ["항목1", "항목2"])
+
     def test_colspan_merges_cells(self):
         storage = (
             '<table><tbody><tr><td colspan="2">합쳐진 칸</td></tr>'
