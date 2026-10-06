@@ -777,15 +777,18 @@ def _clean_text(text: Optional[str]) -> str:
 # ── 구조적 변환: 제목을 번호 체계로 접어넣기 + 표 캡션/주석 자동 첨부 ──────
 #
 # doc2report의 transform/structure.py를 참고해(코드는 가져오지 않고 알고리즘만
-# 참고해 이 파일에 새로 구현) 제목(h1~h6)과 그 아래 문단/목록을 "1. → □ → -"
-# 식 사내 보고서 단락 체계로 접어 넣는다(그 모듈 docstring의 예: "## 추진 배경
-# → 1. 추진 배경"). doc2report의 confluence.yaml은 auto_markers(말머리 없는
-# 제목에 새 말머리를 붙이는 옵션)를 꺼 두지만 - "이미 Confluence 제목 스타일로
-# 구분된 문서라 말머리가 필요 없다"는 판단 - 여기서는 default.yaml 쪽인
-# auto_markers=true를 그대로 썼다. 그 예시가 보여주는 "제목에 번호가 실제로
-# 보이는" 결과가 이 기능의 핵심이라고 판단했기 때문이다. 원문에 이미 "1."
-# "□" 같은 말머리가 쳐 있으면(keep_leading_markers) 그건 그대로 쓰고 새로
-# 붙이지 않는다.
+# 참고해 이 파일에 새로 구현) 제목(h1~h6)을 "1. → □ → -" 식 사내 보고서
+# 번호 체계로 접어 넣는다(그 모듈 docstring의 예: "## 추진 배경 → 1. 추진
+# 배경"). 다만 그 "□"/"-" 말머리는 제목 자신에게만 새로 붙인다 - 제목
+# 아래로 접혀 들어오는 평범한 문단(원문에 말머리가 없던 것)에는 붙이지
+# 않는다(doc2report의 confluence.yaml::auto_markers=false와 같은 취지:
+# "이미 Confluence 제목 스타일로 구분된 문서라 말머리가 필요 없다" - 모든
+# 문단에 "□"를 붙이면 제목 번호("1. → □ → -")의 핵심인 "제목 보기"는
+# 못 살리면서 불필요한 기호만 늘어난다는 사용자 피드백으로 확인). 원래부터
+# 목록(ul/li)이던 항목은 평문단과 달라서 말머리를 그대로 보여준다 - 그게
+# 목록이라는 것 자체를 나타내는 기호이기 때문이다. 원문에 이미 "1." "□"
+# 같은 말머리가 쳐 있으면(keep_leading_markers) 어디서든 그건 그대로 쓰고
+# 새로 붙이지 않는다.
 #
 # 표 캡션/주석 자동 첨부(attach_table_captions/attach_table_notes)도 그대로
 # 들여왔다 - 표 바로 위의 꺾쇠 캡션("【사업현황】")과 표 바로 뒤의 주석(*, ※,
@@ -876,9 +879,17 @@ def _element_leading_marker(element: etree._Element) -> Optional[Tuple[str, str]
     return _find_leading_marker(holder.text) if holder is not None else None
 
 
-def _convert_to_listitem(element: etree._Element, depth: int, *, from_heading: bool = False) -> None:
+def _convert_to_listitem(
+    element: etree._Element, depth: int, *, from_heading: bool = False, suppress_auto_marker: bool = False
+) -> None:
     """요소를 그 자리에서(태그만 바꿔서) "listitem"으로 바꾼다 - 내용(자식/서식)은
-    그대로 두고 번호 체계 렌더링에 필요한 정보만 속성으로 얹는다."""
+    그대로 두고 번호 체계 렌더링에 필요한 정보만 속성으로 얹는다.
+
+    suppress_auto_marker=True면 원문에 말머리가 없을 때 새 말머리를 만들어
+    붙이지 않는다(doc2report의 confluence.yaml::auto_markers=false와 같은
+    취지) - 제목 아래로 접혀 들어온 평문단에 쓴다. 제목 자신과 원래부터
+    목록(ul/li)이던 항목은 이 억제 없이 그대로 말머리가 보여야 "1. → □ → -"
+    체계가 실제로 보이므로 suppress하지 않는다."""
     holder = _leading_text_holder(element)
     if holder is not None:
         found = _find_leading_marker(holder.text)
@@ -890,6 +901,8 @@ def _convert_to_listitem(element: etree._Element, depth: int, *, from_heading: b
     element.set("data-depth", str(max(0, depth)))
     if from_heading:
         element.set("data-from-heading", "1")
+    if suppress_auto_marker:
+        element.set("data-suppress-auto-marker", "1")
 
 
 def _flatten_list_items(list_element: etree._Element, base_depth: int) -> List[etree._Element]:
@@ -940,7 +953,7 @@ def _fold_headings_into_levels(root: etree._Element) -> None:
                         implied = _marker_depth(found[0])
                         if implied is not None:
                             target_depth = max(target_depth, implied)
-                    _convert_to_listitem(child, target_depth)
+                    _convert_to_listitem(child, target_depth, suppress_auto_marker=True)
                 elif found is not None:
                     depth = _marker_depth(found[0])
                     if depth is not None:
@@ -1159,7 +1172,7 @@ def _render_listitem(document: DocxDocument, element: etree._Element, counters: 
     depth = int(element.get("data-depth", "0"))
     level = _NUMBERING_LEVELS[min(depth, len(_NUMBERING_LEVELS) - 1)]
     marker = element.get("data-marker")
-    if marker is None:
+    if marker is None and element.get("data-suppress-auto-marker") != "1":
         marker = _format_marker(level["marker"], depth, counters)
     # 제목에서 접어 넣은 항목은 원문 굵기와 무관하게 항상 굵게(doc2report와 동일) -
     # 그 외(원래 목록/문단이던 항목)는 원문 서식(굵게/기울임 등)만 그대로 쓴다.

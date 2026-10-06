@@ -481,13 +481,16 @@ class RenderedDocxContentTest(unittest.TestCase):
         self.assertIn("회의록", _docx_paragraph_texts(data))
 
     def test_headings_and_paragraph_are_preserved(self):
-        # 구조적 변환(제목 접어넣기)으로 h2는 1단계("1.") 항목이 되고, 그 아래
-        # 평문단은 한 단계 더 들어간 항목("□")이 된다(doc2report의 fold_headings_
-        # into_levels와 같은 규칙) - 말머리+탭이 같은 문단 안에 같이 들어간다.
+        # 구조적 변환(제목 접어넣기)으로 h2는 1단계("1.") 항목이 된다. 그
+        # 아래 평문단은 한 단계 들여 써지지만(indent만), 원문에 말머리가
+        # 없었으므로 "□"를 새로 만들어 붙이지는 않는다(doc2report의
+        # confluence.yaml::auto_markers=false와 같은 취지 - 제목 자신은
+        # 번호가 보여야 의미가 있지만, 평범한 문단에 전부 "□"를 붙이면
+        # 오히려 불필요한 기호만 늘어난다).
         data = self._convert("<h2>소제목</h2><p>본문 내용입니다.</p>")
         texts = _docx_paragraph_texts(data)
         self.assertIn("1.\t소제목", texts)
-        self.assertIn("□\t본문 내용입니다.", texts)
+        self.assertIn("본문 내용입니다.", texts)
 
     def test_bold_and_italic_runs_are_preserved(self):
         data = self._convert("<p>일반 <strong>굵게</strong>와 <em>기울임</em> 텍스트</p>")
@@ -807,10 +810,14 @@ class StructuralFoldTest(unittest.TestCase):
         self.assertNotIn("1.\t측정 기준은 내부 지표입니다.", texts)
 
     def test_paragraph_under_heading_without_marker_becomes_next_depth_item(self):
+        # 말머리("□")는 새로 만들어 붙이지 않지만(auto_markers=false와 같은
+        # 취지), 제목 아래 단계만큼 들여쓰기는 그대로 적용된다.
         data = self._convert("<h2>소제목</h2><p>본문</p><p>본문2</p>")
-        texts = _docx_paragraph_texts(data)
-        self.assertIn("□\t본문", texts)
-        self.assertIn("□\t본문2", texts)
+        document = DocxDocument(io.BytesIO(data))
+        body_paragraphs = [p for p in document.paragraphs if p.text in ("본문", "본문2")]
+        self.assertEqual(len(body_paragraphs), 2)
+        for paragraph in body_paragraphs:
+            self.assertAlmostEqual(paragraph.paragraph_format.left_indent, Mm(4), delta=200)
 
     def test_paragraph_before_any_heading_with_no_marker_stays_plain(self):
         data = self._convert("<p>제목도 말머리도 없는 문단</p>")
@@ -823,7 +830,7 @@ class StructuralFoldTest(unittest.TestCase):
         data = self._convert("<h2>소제목</h2><p><br/></p><p>본문</p>")
         texts = _docx_paragraph_texts(data)
         self.assertFalse(any(t.strip() in ("-", "□", "·") for t in texts))
-        self.assertIn("□\t본문", texts)
+        self.assertIn("본문", texts)
 
     def test_h3_only_document_normalizes_to_depth_zero_not_box_level(self):
         # h2 없이 h3부터 시작하는 문서(normalize_levels) - h3는 원래 depth1("□")이지만
