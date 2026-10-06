@@ -6,6 +6,8 @@ from pathlib import Path
 from unittest import mock
 
 from docx import Document as DocxDocument
+from docx.oxml.ns import qn
+from docx.shared import Mm, Pt
 
 from confluence_agenda.web import confluence_credentials, docx_export
 from confluence_agenda.web.docx_export import (
@@ -437,7 +439,13 @@ class ConvertConfluenceUrlToDocxHttpTest(unittest.TestCase):
 
         self.assertEqual(
             seen,
-            ["컨플루언스 페이지 조회 중...", "본문 분석 중...", "Word 문서 생성 중...", "완료"],
+            [
+                "컨플루언스 페이지 조회 중...",
+                "본문 분석 중...",
+                "연결된 하위 페이지 포함 중...",
+                "Word 문서 생성 중...",
+                "완료",
+            ],
         )
 
     def test_works_without_on_progress_callback(self):
@@ -529,13 +537,15 @@ class RenderedDocxContentTest(unittest.TestCase):
         self.assertIn("안내 문구입니다.", _docx_paragraph_texts(data))
 
     def test_unsupported_macro_without_rich_text_body_becomes_placeholder_note(self):
+        # children/include/excerpt-include는 이제 실제로 펼쳐지므로(아래 LinkedPages
+        # 테스트들 참고), 여기서는 그 외의(렌더링 미지원) 매크로로 확인한다.
         storage = (
-            '<ac:structured-macro ac:name="children" '
+            '<ac:structured-macro ac:name="jira" '
             'xmlns:ac="http://www.atlassian.com/schema/confluence/4/ac/"/>'
         )
         data = self._convert(storage)
         texts = _docx_paragraph_texts(data)
-        self.assertTrue(any("children" in t and "지원하지 않습니다" in t for t in texts))
+        self.assertTrue(any("jira" in t and "지원하지 않습니다" in t for t in texts))
 
     def test_image_becomes_placeholder_note(self):
         storage = (
@@ -632,6 +642,216 @@ class DiagnoseConnectionTest(unittest.TestCase):
 
         self.assertTrue(any("✓ CONFLUENCE_DEP_TICKET 설정됨" in l for l in lines))
         self.assertTrue(any("✓ CONFLUENCE_DATA_CLASSIFICATION 설정됨" in l for l in lines))
+
+
+class LinkedPagesExpansionTest(unittest.TestCase):
+    """include/excerpt-include/children 매크로가 실제로 다른 페이지를 더 불러와
+    그 자리에 펼쳐지는지 확인한다(_resolve_linked_pages)."""
+
+    def setUp(self):
+        self._env_patch = mock.patch.dict(
+            os.environ, {"CONFLUENCE_URL": "https://wiki.example.com"}, clear=True
+        )
+        self._env_patch.start()
+        self.addCleanup(self._env_patch.stop)
+
+    def test_include_macro_expands_into_subpage_with_title_prefix_stripped(self):
+        root_storage = (
+            '<ac:structured-macro ac:name="include" '
+            'xmlns:ac="http://www.atlassian.com/schema/confluence/4/ac/" '
+            'xmlns:ri="http://www.atlassian.com/schema/confluence/4/ri/">'
+            '<ac:parameter ac:name=""><ac:link>'
+            '<ri:page ri:content-title="(첨부 1) 안건1"/>'
+            "</ac:link></ac:parameter>"
+            "</ac:structured-macro>"
+        )
+        root_resp = _page_response(root_storage, title="회의록")
+        sub_resp = _fake_response(
+            json_data={
+                "results": [
+                    {
+                        "id": "999",
+                        "title": "(첨부 1) 안건1",
+                        "body": {"storage": {"value": "<p>첨부 내용입니다.</p>"}},
+                    }
+                ]
+            }
+        )
+
+        def fake_get(url, **kwargs):
+            if url.endswith("/rest/api/content/123"):
+                return root_resp
+            if url.endswith("/rest/api/content"):
+                return sub_resp
+            raise AssertionError(f"unexpected url: {url}")
+
+        with mock.patch("requests.get", side_effect=fake_get):
+            data, _ = convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+        texts = _docx_paragraph_texts(data)
+        self.assertIn("안건1", texts)  # "(첨부 1)" 접두어가 제거된 제목
+        self.assertNotIn("(첨부 1) 안건1", texts)
+        self.assertIn("첨부 내용입니다.", texts)
+
+    def test_children_macro_expands_each_child_page(self):
+        root_storage = (
+            '<ac:structured-macro ac:name="children" '
+            'xmlns:ac="http://www.atlassian.com/schema/confluence/4/ac/"/>'
+        )
+        root_resp = _page_response(root_storage, title="회의록")
+        children_resp = _fake_response(
+            json_data={
+                "results": [
+                    {"id": "201", "title": "안건A", "body": {"storage": {"value": "<p>A 내용</p>"}}},
+                    {"id": "202", "title": "안건B", "body": {"storage": {"value": "<p>B 내용</p>"}}},
+                ]
+            }
+        )
+
+        def fake_get(url, **kwargs):
+            if url.endswith("/rest/api/content/123"):
+                return root_resp
+            if url.endswith("/rest/api/content/123/child/page"):
+                return children_resp
+            raise AssertionError(f"unexpected url: {url}")
+
+        with mock.patch("requests.get", side_effect=fake_get):
+            data, _ = convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+        texts = _docx_paragraph_texts(data)
+        self.assertIn("안건A", texts)
+        self.assertIn("A 내용", texts)
+        self.assertIn("안건B", texts)
+        self.assertIn("B 내용", texts)
+
+    def test_include_macro_pointing_back_to_root_page_is_skipped_as_cycle(self):
+        root_storage = (
+            '<ac:structured-macro ac:name="include" '
+            'xmlns:ac="http://www.atlassian.com/schema/confluence/4/ac/" '
+            'xmlns:ri="http://www.atlassian.com/schema/confluence/4/ri/">'
+            '<ac:parameter ac:name=""><ac:link>'
+            '<ri:page ri:content-title="회의록"/>'
+            "</ac:link></ac:parameter>"
+            "</ac:structured-macro>"
+        )
+        root_resp = _page_response(root_storage, title="회의록")
+        self_resp = _fake_response(
+            json_data={
+                "results": [
+                    {"id": "123", "title": "회의록", "body": {"storage": {"value": "<p>본문</p>"}}}
+                ]
+            }
+        )
+
+        def fake_get(url, **kwargs):
+            if url.endswith("/rest/api/content/123"):
+                return root_resp
+            if url.endswith("/rest/api/content"):
+                return self_resp
+            raise AssertionError(f"unexpected url: {url}")
+
+        with mock.patch("requests.get", side_effect=fake_get):
+            data, _ = convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+        texts = _docx_paragraph_texts(data)
+        self.assertTrue(any("순환" in t for t in texts))
+
+    def test_include_macro_target_not_found_becomes_placeholder(self):
+        root_storage = (
+            '<ac:structured-macro ac:name="include" '
+            'xmlns:ac="http://www.atlassian.com/schema/confluence/4/ac/" '
+            'xmlns:ri="http://www.atlassian.com/schema/confluence/4/ri/">'
+            '<ac:parameter ac:name=""><ac:link>'
+            '<ri:page ri:content-title="존재하지 않는 페이지"/>'
+            "</ac:link></ac:parameter>"
+            "</ac:structured-macro>"
+        )
+        root_resp = _page_response(root_storage, title="회의록")
+        empty_resp = _fake_response(json_data={"results": []})
+
+        def fake_get(url, **kwargs):
+            if url.endswith("/rest/api/content/123"):
+                return root_resp
+            if url.endswith("/rest/api/content"):
+                return empty_resp
+            raise AssertionError(f"unexpected url: {url}")
+
+        with mock.patch("requests.get", side_effect=fake_get):
+            data, _ = convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+        texts = _docx_paragraph_texts(data)
+        self.assertTrue(any("찾을 수 없습니다" in t for t in texts))
+
+
+class DocumentStyleConfigurationTest(unittest.TestCase):
+    """doc2report의 profiles/confluence.yaml(+default.yaml)에서 옮긴 글꼴/크기/여백
+    값이 실제로 적용되는지 확인한다(_configure_document_styles)."""
+
+    def setUp(self):
+        self._env_patch = mock.patch.dict(
+            os.environ, {"CONFLUENCE_URL": "https://wiki.example.com"}, clear=True
+        )
+        self._env_patch.start()
+        self.addCleanup(self._env_patch.stop)
+
+    def _convert_document(self) -> DocxDocument:
+        resp = _page_response("<h1>소제목</h1><p>본문</p>", title="회의록")
+        with mock.patch("requests.get", return_value=resp):
+            data, _ = convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+        return DocxDocument(io.BytesIO(data))
+
+    def test_normal_style_matches_confluence_profile(self):
+        document = self._convert_document()
+        normal = document.styles["Normal"]
+        self.assertEqual(normal.font.name, "맑은 고딕")
+        self.assertEqual(normal.font.size, Pt(12))
+        east_asia = normal.font._element.get_or_add_rPr().get_or_add_rFonts().get(qn("w:eastAsia"))
+        self.assertEqual(east_asia, "맑은 고딕")
+
+    def test_title_style_is_centered_bold_underlined_18pt(self):
+        document = self._convert_document()
+        title = document.styles["Title"]
+        self.assertEqual(title.font.size, Pt(18))
+        self.assertTrue(title.font.bold)
+        self.assertTrue(title.font.underline)
+
+    def test_heading_styles_use_profile_sizes(self):
+        document = self._convert_document()
+        self.assertEqual(document.styles["Heading 1"].font.size, Pt(15))
+        self.assertEqual(document.styles["Heading 2"].font.size, Pt(14))
+        self.assertEqual(document.styles["Heading 3"].font.size, Pt(14))
+        self.assertTrue(document.styles["Heading 1"].font.bold)
+
+    def test_margins_are_20mm(self):
+        document = self._convert_document()
+        section = document.sections[0]
+        # 여백은 OOXML에 1/20pt(dxa) 단위로 저장돼 Mm 왕복에 아주 작은 양자화 오차가
+        # 생길 수 있어(20mm == 56.69...pt), 정확한 EMU 일치가 아니라 근사치로 확인한다.
+        self.assertAlmostEqual(section.top_margin, Mm(20), delta=200)
+        self.assertAlmostEqual(section.left_margin, Mm(20), delta=200)
+
+    def test_table_header_row_is_bold_shaded_and_10pt(self):
+        storage = (
+            "<table><tbody>"
+            "<tr><th>헤더1</th><th>헤더2</th></tr>"
+            "<tr><td>값1</td><td>값2</td></tr>"
+            "</tbody></table>"
+        )
+        resp = _page_response(storage, title="회의록")
+        with mock.patch("requests.get", return_value=resp):
+            data, _ = convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+        document = DocxDocument(io.BytesIO(data))
+        table = document.tables[0]
+        header_run = table.cell(0, 0).paragraphs[0].runs[0]
+        self.assertEqual(header_run.font.size, Pt(10))
+        self.assertTrue(header_run.bold)
+        shading = table.cell(0, 0)._tc.get_or_add_tcPr().find(qn("w:shd"))
+        self.assertIsNotNone(shading)
+        self.assertEqual(shading.get(qn("w:fill")), "F2F2F2")
+
+        data_run = table.cell(1, 0).paragraphs[0].runs[0]
+        self.assertEqual(data_run.font.size, Pt(10))
+        self.assertFalse(data_run.bold)
 
 
 if __name__ == "__main__":

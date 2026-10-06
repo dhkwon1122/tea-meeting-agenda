@@ -8,8 +8,29 @@ wcoffee77/document-parsing(doc2report)을 참고했지만, 그 코드를 가져�
 
 지원하는 것: 제목(h1~h6), 문단(굵게/기울임/밑줄/줄바꿈), 목록(ul/ol, 평평하게),
 표(칸 병합 중 colspan만 반영), 패널/펼치기류 매크로(rich-text-body가 있으면
-그 내용만 펼침). 지원하지 않는 것(건너뛰고 자리만 표시): 이미지/첨부 다운로드,
-행 병합(rowspan), 다른 페이지를 끌어오는 매크로(include/하위 페이지 등).
+그 내용만 펼침), 다른 페이지를 끌어오는 매크로(include/excerpt-include/
+children - doc2report의 sources/confluence.py::LinkedPages를 참고해 직접
+구현, 아래 "연결된 페이지" 설명 참고). 지원하지 않는 것(건너뛰고 자리만
+표시): 이미지/첨부 다운로드, 행 병합(rowspan), 본문 링크(단순 하이퍼링크)
+따라가기.
+
+글꼴/서식은 doc2report의 profiles/confluence.yaml(+ extends: default인
+profiles/default.yaml) 값을 그대로 옮겼다(_configure_document_styles) -
+맑은 고딕, 본문 12pt, 제목(문서 맨 위) 18pt·가운데·밑줄, 소제목 1/2/3단계
+15/14/14pt 굵게, 표 10pt, 여백 20mm, 표 머리행 음영 F2F2F2. 다만 그
+프로파일의 "제목을 1./□/- 번호 체계로 접어 넣는" 구조화 변환(fold_headings_
+into_levels), 표 칸 폭에 맞춰 글자 크기를 단계적으로 줄이는 알고리즘, 문장
+다듬기 등은 가져오지 않았다 - 글꼴·크기·여백 같은 "값"은 그대로 옮길 수
+있지만 그 변환 로직들은 doc2report 코드 자체(수백~수천 줄)를 들여와야 해서
+범위 밖으로 남겨뒀다.
+
+연결된 페이지(include/excerpt-include/children 매크로)는 실제로 다른
+페이지를 REST API로 더 불러와 그 자리에 쪽 나눔 + 제목으로 펼친다 - 이
+프로젝트 자신의 안건 생성기(builder.py)가 만드는 "(첨부 N) 제목" 하위
+페이지를 include로 연결하는 구조와 정확히 맞아떨어진다(포함된 페이지
+제목에서 "(첨부 N)" 접두어를 떼는 것도 doc2report의 text.page_title_strip
+규칙을 그대로 따옴). 순환 참조/과도한 중첩은 깊이 4단계·전체 40페이지로
+제한한다(doc2report의 MAX_LINK_DEPTH/MAX_LINKED_PAGES와 동일한 값).
 
 CONFLUENCE_URL이 없으면 이 기능 자체가 꺼진다(is_feature_available() False).
 
@@ -54,9 +75,16 @@ from . import confluence_credentials
 
 try:
     from docx import Document as DocxDocument
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml.ns import qn
+    from docx.shared import Mm, Pt
     from lxml import etree
 except ImportError:  # python-docx/lxml 미설치 - 이 기능만 비활성화된다.
     DocxDocument = None
+    WD_ALIGN_PARAGRAPH = None
+    qn = None
+    Mm = None
+    Pt = None
     etree = None
 
 # Confluence storage format이 쓰는 매크로/리소스 네임스페이스. REST API가 주는
@@ -426,7 +454,7 @@ def _fetch_page(base_url: str, page_id: str, token: str) -> dict:
     try:
         resp = requests.get(
             f"{base_url}/rest/api/content/{page_id}",
-            params={"expand": "body.storage"},
+            params={"expand": "body.storage,space"},
             headers=_request_headers(token),
             timeout=30,
             verify=_ssl_verify(),
@@ -444,6 +472,234 @@ def _fetch_page(base_url: str, page_id: str, token: str) -> dict:
     if resp.status_code >= 400:
         raise RuntimeError(f"Confluence API 오류 (HTTP {resp.status_code}): {resp.text[:300]}")
     return resp.json()
+
+
+def _find_page_by_title(base_url: str, token: str, title: str, space: Optional[str]) -> Optional[dict]:
+    """제목(+스페이스)으로 페이지를 찾는다 - include/excerpt-include 매크로가
+    가리키는 대상(doc2report의 LinkedPages._find()와 같은 엔드포인트)."""
+    params = {"title": title, "expand": "body.storage,space", "limit": 1}
+    if space:
+        params["spaceKey"] = space
+    try:
+        resp = requests.get(
+            f"{base_url}/rest/api/content",
+            params=params,
+            headers=_request_headers(token),
+            timeout=30,
+            verify=_ssl_verify(),
+            proxies=_proxies(),
+        )
+    except (requests.RequestException, OSError) as exc:
+        raise _wrap_connection_error(exc) from exc
+    if resp.status_code != 200:
+        return None
+    results = resp.json().get("results") or []
+    return results[0] if results else None
+
+
+def _fetch_child_pages(base_url: str, token: str, page_id: str) -> List[dict]:
+    """children 매크로가 가리키는 하위 페이지 목록(doc2report의
+    LinkedPages._children()과 같은 엔드포인트)."""
+    try:
+        resp = requests.get(
+            f"{base_url}/rest/api/content/{page_id}/child/page",
+            params={"limit": 200, "expand": "body.storage,space"},
+            headers=_request_headers(token),
+            timeout=30,
+            verify=_ssl_verify(),
+            proxies=_proxies(),
+        )
+    except (requests.RequestException, OSError) as exc:
+        raise _wrap_connection_error(exc) from exc
+    if resp.status_code != 200:
+        return []
+    return resp.json().get("results") or []
+
+
+# ── 연결된 페이지(include/excerpt-include/children) 펼치기 ──────────────
+#
+# doc2report의 sources/confluence.py::LinkedPages를 참고해 직접 구현했다(코드
+# 자체를 들여오지는 않음). storage XHTML을 파싱한 트리 위에서, 매크로 노드를
+# 실제로 불러온 하위 페이지의 내용(쪽 나눔 + 제목 + 본문)으로 그 자리에서
+# 바꿔치기한다 - 그 뒤에 이어지는 렌더링(_render_blocks)은 이게 원래부터
+# 거기 있던 내용인 것처럼 그냥 처리한다.
+
+_LINKED_MACRO_NAMES = {"include", "excerpt-include", "children"}
+
+# "(첨부 1) 안건1" 같은 하위 페이지 제목에서 "(첨부 N)" 접두어를 뗀다 -
+# builder.py가 만드는 제목 규칙과 doc2report의 text.page_title_strip 규칙을
+# 그대로 따름.
+_TITLE_STRIP_RE = re.compile(r"^\s*\(\s*첨부\s*[0-9]*\s*\)\s*")
+
+
+def _clean_included_title(title: str) -> str:
+    return _TITLE_STRIP_RE.sub("", title or "").strip()
+
+
+class _LinkContext:
+    """include/excerpt-include/children 매크로를 펼치는 동안의 상태(기준
+    URL/토큰/스페이스 + 이미 포함한 페이지 집합 + 누적 로드 수). 순환 참조나
+    과도한 중첩을 doc2report와 같은 한도(MAX_DEPTH=4, MAX_PAGES=40)로 막는다."""
+
+    MAX_DEPTH = 4
+    MAX_PAGES = 40
+
+    def __init__(self, base_url: str, token: str, space: Optional[str], root_page_id: str):
+        self.base_url = base_url
+        self.token = token
+        self.space = space
+        self.visited = {root_page_id}
+        self.loaded = 0
+
+
+def _link_limit_reached(ctx: _LinkContext, depth: int) -> bool:
+    return depth >= _LinkContext.MAX_DEPTH or ctx.loaded >= _LinkContext.MAX_PAGES
+
+
+def _extract_link_target(
+    macro: etree._Element,
+) -> Optional[Tuple[Optional[str], Optional[str], Optional[str]]]:
+    """매크로 안의 ac:parameter > ac:link > ri:page에서 (페이지ID, 제목, 스페이스)를
+    뽑는다 - builder.py가 실제로 만드는 include 매크로는 ri:content-title만
+    쓰고 ri:space-key는 없는 형태라, 그 경우 스페이스는 ctx.space(원본 페이지의
+    스페이스)로 보충한다."""
+    for param in macro.findall("ac:parameter", namespaces={"ac": _AC_NS}):
+        link = param.find("ac:link", namespaces={"ac": _AC_NS})
+        if link is None:
+            continue
+        page_ref = link.find("ri:page", namespaces={"ri": _RI_NS})
+        if page_ref is None:
+            continue
+        content_id = page_ref.get(f"{{{_RI_NS}}}content-id")
+        title = page_ref.get(f"{{{_RI_NS}}}content-title")
+        space = page_ref.get(f"{{{_RI_NS}}}space-key")
+        if content_id or title:
+            return content_id, title, space
+    return None
+
+
+def _resolve_target_page(
+    ctx: _LinkContext, content_id: Optional[str], title: Optional[str], space: Optional[str]
+) -> Optional[dict]:
+    if content_id:
+        try:
+            return _fetch_page(ctx.base_url, content_id, ctx.token)
+        except Exception:
+            return None
+    if title:
+        return _find_page_by_title(ctx.base_url, ctx.token, title, space or ctx.space)
+    return None
+
+
+def _replace_macro_with_placeholder(macro: etree._Element, message: str) -> None:
+    placeholder = etree.Element("p")
+    placeholder.text = message
+    macro.addnext(placeholder)
+    macro.getparent().remove(macro)
+
+
+def _splice_elements_in_place(macro: etree._Element, new_elements: List[etree._Element]) -> None:
+    anchor = macro
+    for new_elem in new_elements:
+        anchor.addnext(new_elem)
+        anchor = new_elem
+    macro.getparent().remove(macro)
+
+
+def _page_section_elements(title: str, sub_root: etree._Element) -> List[etree._Element]:
+    """쪽 나눔 + (접두어를 뗀) 제목 + 하위 페이지 본문으로 이어지는 요소 목록을
+    만든다 - include/children 둘 다 이걸로 매크로 자리를 채운다."""
+    pagebreak = etree.Element("pagebreak")
+    heading = etree.Element("h1")
+    heading.text = _clean_included_title(title)
+    return [pagebreak, heading] + list(sub_root)
+
+
+def _resolve_linked_pages(
+    container: etree._Element, ctx: _LinkContext, current_page_id: str, depth: int
+) -> None:
+    macros = [
+        m
+        for m in container.iter(f"{{{_AC_NS}}}structured-macro")
+        if (m.get(f"{{{_AC_NS}}}name") or "") in _LINKED_MACRO_NAMES
+    ]
+    for macro in macros:
+        name = macro.get(f"{{{_AC_NS}}}name")
+        if name == "children":
+            _expand_children_macro(macro, ctx, current_page_id, depth)
+        else:
+            _expand_include_macro(macro, ctx, depth)
+
+
+def _expand_include_macro(macro: etree._Element, ctx: _LinkContext, depth: int) -> None:
+    target = _extract_link_target(macro)
+    if target is None or _link_limit_reached(ctx, depth):
+        _replace_macro_with_placeholder(
+            macro, "[연결된 페이지 - 가져올 수 없거나 중첩 한도를 넘어 건너뛰었습니다]"
+        )
+        return
+
+    content_id, title, space = target
+    page = _resolve_target_page(ctx, content_id, title, space)
+    if page is None:
+        _replace_macro_with_placeholder(
+            macro, f"[연결된 페이지({title or content_id}) - 찾을 수 없습니다]"
+        )
+        return
+
+    page_id = page.get("id")
+    if not page_id or page_id in ctx.visited:
+        _replace_macro_with_placeholder(
+            macro,
+            f"[연결된 페이지({page.get('title') or title}) - "
+            "이미 포함되어 순환을 막기 위해 건너뛰었습니다]",
+        )
+        return
+
+    storage_html = page.get("body", {}).get("storage", {}).get("value")
+    if not storage_html:
+        _replace_macro_with_placeholder(
+            macro, f"[연결된 페이지({page.get('title')}) - 본문이 없습니다]"
+        )
+        return
+
+    ctx.visited.add(page_id)
+    ctx.loaded += 1
+    sub_root = _parse_storage(storage_html)
+    _resolve_linked_pages(sub_root, ctx, page_id, depth + 1)
+    _splice_elements_in_place(macro, _page_section_elements(page.get("title") or title or "", sub_root))
+
+
+def _expand_children_macro(
+    macro: etree._Element, ctx: _LinkContext, current_page_id: str, depth: int
+) -> None:
+    target = _extract_link_target(macro)
+    parent_page_id = target[0] if target and target[0] else current_page_id
+    if _link_limit_reached(ctx, depth):
+        _replace_macro_with_placeholder(macro, "[하위 페이지 목록 - 중첩 한도를 넘어 건너뛰었습니다]")
+        return
+
+    children = _fetch_child_pages(ctx.base_url, ctx.token, parent_page_id)
+    sections: List[etree._Element] = []
+    for child in children:
+        if _link_limit_reached(ctx, depth):
+            break
+        child_id = child.get("id")
+        if not child_id or child_id in ctx.visited:
+            continue
+        storage_html = child.get("body", {}).get("storage", {}).get("value")
+        if not storage_html:
+            continue
+        ctx.visited.add(child_id)
+        ctx.loaded += 1
+        sub_root = _parse_storage(storage_html)
+        _resolve_linked_pages(sub_root, ctx, child_id, depth + 1)
+        sections.extend(_page_section_elements(child.get("title") or "", sub_root))
+
+    if not sections:
+        _replace_macro_with_placeholder(macro, "[하위 페이지 없음]")
+        return
+    _splice_elements_in_place(macro, sections)
 
 
 # ── storage XHTML 파싱 ──────────────────────────────────────────────────
@@ -479,8 +735,65 @@ _HEADING_LEVELS = {f"h{n}": n for n in range(1, 7)}
 _BLOCK_FLATTEN_TAGS = {"div", "root", "layout", "layout-section", "layout-cell"}
 
 
+# doc2report의 profiles/confluence.yaml(+ extends: default인 profiles/default.yaml)에서
+# 그대로 옮긴 값들 - 그 프로파일의 구조적 변환(제목 접어넣기/표 글자 자동 축소/문장
+# 다듬기)은 가져오지 않았다(모듈 docstring 참고), 글꼴/크기/여백/음영 "값"만 옮김.
+_DOCUMENT_FONT_NAME = "맑은 고딕"
+_HEADING_FONT_SIZES_PT = {1: 15, 2: 14, 3: 14}  # 4~6단계는 3단계 값을 그대로 재사용.
+_TABLE_HEADER_SHADING_HEX = "F2F2F2"
+
+
+def _set_east_asian_font(font, name: str) -> None:
+    """python-docx의 Font.name은 ascii/hAnsi만 설정하고 eastAsia(한글 글꼴)는
+    안 건드려서, 한글 문서에서 영문 글꼴로 보이는 걸 막으려면 w:eastAsia를
+    직접 oxml로 설정해야 한다. font._element는 런(CT_R)이든 스타일(CT_Style)이든
+    get_or_add_rPr()을 지원해서 둘 다 같은 방식으로 처리된다."""
+    font.name = name
+    r_pr = font._element.get_or_add_rPr()
+    r_pr.get_or_add_rFonts().set(qn("w:eastAsia"), name)
+
+
+def _shade_cell(cell, hex_color: str) -> None:
+    shading = etree.SubElement(cell._tc.get_or_add_tcPr(), qn("w:shd"))
+    shading.set(qn("w:val"), "clear")
+    shading.set(qn("w:color"), "auto")
+    shading.set(qn("w:fill"), hex_color)
+
+
+def _configure_document_styles(document: DocxDocument) -> None:
+    for section in document.sections:
+        section.top_margin = Mm(20)
+        section.bottom_margin = Mm(20)
+        section.left_margin = Mm(20)
+        section.right_margin = Mm(20)
+
+    normal = document.styles["Normal"]
+    _set_east_asian_font(normal.font, _DOCUMENT_FONT_NAME)
+    normal.font.size = Pt(12)
+    normal.paragraph_format.space_before = Pt(0)
+    normal.paragraph_format.space_after = Pt(0)
+
+    title_style = document.styles["Title"]
+    _set_east_asian_font(title_style.font, _DOCUMENT_FONT_NAME)
+    title_style.font.size = Pt(18)
+    title_style.font.bold = True
+    title_style.font.underline = True
+    title_style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    for level in range(1, 7):
+        try:
+            style = document.styles[f"Heading {level}"]
+        except KeyError:
+            continue
+        _set_east_asian_font(style.font, _DOCUMENT_FONT_NAME)
+        style.font.size = Pt(_HEADING_FONT_SIZES_PT.get(level, _HEADING_FONT_SIZES_PT[3]))
+        style.font.bold = True
+        style.paragraph_format.keep_with_next = True
+
+
 def _render_document(title: str, root: etree._Element) -> bytes:
     document = DocxDocument()
+    _configure_document_styles(document)
     document.add_heading(title or "", level=0)
     _render_blocks(document, root)
     buf = BytesIO()
@@ -492,7 +805,11 @@ def _render_blocks(document: DocxDocument, container: etree._Element) -> None:
     for element in container:
         tag = _local(element.tag)
 
-        if tag in _HEADING_LEVELS:
+        if tag == "pagebreak":
+            # 연결된 페이지(include/children) 사이에 끼워 넣는 쪽 나눔 - 진짜
+            # Confluence 태그가 아니라 _resolve_linked_pages가 만들어 넣는 합성 요소.
+            document.add_page_break()
+        elif tag in _HEADING_LEVELS:
             _add_inline_runs(document.add_heading("", level=_HEADING_LEVELS[tag]), element)
         elif tag == "p":
             _add_inline_runs(document.add_paragraph(), element)
@@ -583,8 +900,15 @@ def _render_table(document: DocxDocument, table_element: etree._Element) -> None
             docx_cell = table.cell(row_index, col_index)
             if span > 1:
                 docx_cell = docx_cell.merge(table.cell(row_index, col_index + span - 1))
-            docx_cell.text = ""
-            _add_inline_runs(docx_cell.paragraphs[0], cell)
+            paragraph = docx_cell.paragraphs[0]
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            is_header = _local(cell.tag) == "th"
+            _add_inline_runs(paragraph, cell, bold=is_header)
+            for run in paragraph.runs:
+                run.font.size = Pt(10)
+                _set_east_asian_font(run.font, _DOCUMENT_FONT_NAME)
+            if is_header:
+                _shade_cell(docx_cell, _TABLE_HEADER_SHADING_HEX)
             col_index += span
 
 
@@ -689,6 +1013,11 @@ def convert_confluence_url_to_docx(
     say("본문 분석 중...")
     title = page.get("title") or url
     root = _parse_storage(storage_html)
+
+    say("연결된 하위 페이지 포함 중...")
+    space = (page.get("space") or {}).get("key")
+    link_ctx = _LinkContext(base_url, effective_token, space, page_id)
+    _resolve_linked_pages(root, link_ctx, page_id, depth=0)
 
     say("Word 문서 생성 중...")
     data = _render_document(title, root)
