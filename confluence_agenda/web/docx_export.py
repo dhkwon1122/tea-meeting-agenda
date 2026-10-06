@@ -884,18 +884,26 @@ def _clean_text(text: Optional[str]) -> str:
 # ── 구조적 변환: 제목을 번호 체계로 접어넣기 + 표 캡션/주석 자동 첨부 ──────
 #
 # doc2report의 transform/structure.py를 참고해(코드는 가져오지 않고 알고리즘만
-# 참고해 이 파일에 새로 구현) 제목(h1~h6)을 "1. → □ → -" 식 사내 보고서
-# 번호 체계로 접어 넣는다(그 모듈 docstring의 예: "## 추진 배경 → 1. 추진
-# 배경"). 다만 그 "□"/"-" 말머리는 제목 자신에게만 새로 붙인다 - 제목
-# 아래로 접혀 들어오는 평범한 문단(원문에 말머리가 없던 것)에는 붙이지
-# 않는다(doc2report의 confluence.yaml::auto_markers=false와 같은 취지:
-# "이미 Confluence 제목 스타일로 구분된 문서라 말머리가 필요 없다" - 모든
-# 문단에 "□"를 붙이면 제목 번호("1. → □ → -")의 핵심인 "제목 보기"는
-# 못 살리면서 불필요한 기호만 늘어난다는 사용자 피드백으로 확인). 원래부터
-# 목록(ul/li)이던 항목은 평문단과 달라서 말머리를 그대로 보여준다 - 그게
-# 목록이라는 것 자체를 나타내는 기호이기 때문이다. 원문에 이미 "1." "□"
-# 같은 말머리가 쳐 있으면(keep_leading_markers) 어디서든 그건 그대로 쓰고
-# 새로 붙이지 않는다.
+# 참고해 이 파일에 새로 구현) 제목(h1~h6)과 그 아래 문단/목록을 depth(들여쓰기)
+# 단계로 접어 넣는다 - 제목은 h2가 depth 0, h3이 depth 1, ... 식으로 깊어지고
+# (normalize_levels로 문서 전체의 최저 단계를 0으로 민다), 제목 아래 평문단은
+# 그보다 한 단계 더 들여쓴다.
+#
+# 다만 "1." "□" "-" 같은 말머리는 새로 만들어 붙이지 않는다(doc2report의
+# confluence.yaml::auto_markers=false와 같은 취지 - "이미 Confluence 제목
+# 스타일로 구분된 문서라 말머리가 필요 없다"). 처음엔 제목에만 예외적으로
+# "제목에 번호가 보여야 의미 있다"는 이유로 번호를 새로 붙여 봤지만, 그러면
+# 본문이 긴 문서는 거의 모든 줄 앞에 말머리가 붙어 버려서(제목 자신에게만
+# 붙여도 그 아래 평문단과 뒤섞여 똑같이 번잡해 보임) 실사용 피드백으로
+# 도로 뺐다("그냥 안 붙여도 되겠어") - 결국 doc2report의 원래 설정을 그대로
+# 따르는 쪽이 맞았다. 원래부터 목록(ul/li)이던 항목은 다르게 취급한다 -
+# 그건 "제목 아래로 접혀 들어온 평문단"이 아니라 애초에 목록이었다는 것
+# 자체가 말머리로 드러나야 하므로, 원문에 말머리가 없으면 depth에 따라
+# "1." "□" "-" "·"를 새로 매겨 보여준다(건 보통 ul/li 자체가 "항목 나열"이라는
+# 저자의 의도를 담고 있어서 혼동 위험이 적음). 원문에 이미 "1." "□" 같은
+# 말머리가 쳐 있으면(keep_leading_markers) 제목·문단·목록 어디서든 그건
+# 그대로 쓰고 새로 붙이지 않는다 - 이 프로젝트의 builder.py가 만드는 안건
+# 제목("1. 안건1", "2. 안건2")이 바로 이 경우라 그 번호는 그대로 보인다.
 #
 # 표 캡션/주석 자동 첨부(attach_table_captions/attach_table_notes)도 그대로
 # 들여왔다 - 표 바로 위의 꺾쇠 캡션("【사업현황】")과 표 바로 뒤의 주석(*, ※,
@@ -1043,7 +1051,11 @@ def _fold_headings_into_levels(root: etree._Element) -> None:
             elif tag in _HEADING_LEVELS:
                 depth = max(0, _HEADING_LEVELS[tag] - _HEADING_FOLD_BASE)
                 state["depth"] = depth
-                _convert_to_listitem(child, depth, from_heading=True)
+                # 제목에도 "1."/"□" 같은 말머리를 새로 붙이지 않는다(사용자 피드백:
+                # "그냥 안 붙여도 되겠어") - 원문에 이미 말머리가 있으면(keep_leading_
+                # markers) 그건 그대로 쓰지만, 없으면 들여쓰기+굵게만 적용하고
+                # 말머리는 비워 둔다.
+                _convert_to_listitem(child, depth, from_heading=True, suppress_auto_marker=True)
             elif tag in ("ul", "ol"):
                 items = _flatten_list_items(child, state["depth"] + 1)
                 _splice_elements_in_place(child, items)
