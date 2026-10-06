@@ -12,8 +12,21 @@ wcoffee77/document-parsing(doc2report)을 참고했지만, 그 코드를 가져�
 행 병합(rowspan), 다른 페이지를 끌어오는 매크로(include/하위 페이지 등).
 
 CONFLUENCE_URL이 없으면 이 기능 자체가 꺼진다(is_feature_available() False).
+
+인증은 Server/Data Center의 개인 액세스 토큰(PAT) 방식이 기본이다 -
+CONFLUENCE_USERNAME을 안 채우면 Authorization: Bearer <토큰>으로 보낸다
+(doc2report의 sources/confluence.py::_auth_header()가 쓰는 방식을 그대로
+따름). CONFLUENCE_USERNAME을 채우면 Cloud용 Basic(이메일+API 토큰)으로
+바뀌지만, 이 프로젝트가 실제로 쓰는 환경(사내 Confluence, Server/DC)에서는
+절대 채우면 안 된다 - 채워져 있으면 PAT이 Basic 인증 비밀번호로 잘못
+보내져 인증이 깨진다.
+
 토큰(PAT)은 두 가지 경로를 지원한다:
   1. 사용자별 등록 (confluence_credentials.py, 로그인 DB에 암호화 저장) - 우선.
+     등록 시 verify_token()으로 Confluence에 직접 물어 실제 유효한 PAT인지,
+     누구 것인지 확인한다(doc2report의 confluence_whoami() 참고 - Server/DC는
+     틀린 토큰에 401 대신 익명 사용자로 응답하는 경우가 있어 상태 코드만으로는
+     못 걸러낸다).
   2. 전역 CONFLUENCE_API_TOKEN 환경변수 - 사용자별 등록이 없을 때 fallback
      (로그인 기능을 안 쓰는 배포, 또는 CLI 전용 사용 등).
 """
@@ -126,6 +139,54 @@ def _ssl_verify():
         if path:
             return path
     return True
+
+
+def verify_token(token: str) -> str:
+    """이 PAT이 실제로 유효한지, Confluence가 보기에 누구 것인지 확인한다.
+
+    Server/Data Center는 토큰이 틀려도 401이 아니라 익명 사용자로 응답하는
+    경우가 있어서(wcoffee77/document-parsing의 confluence_whoami()가 실측해
+    남긴 주의사항), 상태 코드만 보면 틀린 토큰을 "유효함"으로 착각할 수 있다.
+    PAT을 등록할 때(app.py의 save_confluence_pat) 이 확인을 거쳐, 등록자가
+    적은 이름이 아니라 Confluence가 확인한 실제 사용자 이름으로 "누구 토큰인지"
+    보여준다(토큰 도용 방지).
+
+    반환값은 "표시 이름 (로그인 ID)" 형태. 실패하면 RuntimeError.
+    """
+    if not is_url_configured():
+        raise DocxExportUnavailable(
+            "CONFLUENCE_URL 환경변수가 설정되지 않았습니다. .env.example을 참고해 설정해주세요."
+        )
+
+    base_url = _normalize_base_url(os.environ.get("CONFLUENCE_URL", "").strip())
+    try:
+        resp = requests.get(
+            f"{base_url}/rest/api/user/current",
+            headers=_auth_headers(token),
+            timeout=30,
+            verify=_ssl_verify(),
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(
+            f"Confluence 서버 연결 실패: {exc}\n"
+            "사내망 SSL 인증서 문제일 수 있습니다 - CONFLUENCE_CA_BUNDLE 환경변수로 "
+            "사내 루트 인증서(.crt/.pem) 경로를 지정해 보세요."
+        ) from exc
+
+    if resp.status_code == 401:
+        raise RuntimeError("PAT이 올바르지 않습니다(401).")
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Confluence API 오류 (HTTP {resp.status_code}): {resp.text[:300]}")
+
+    data = resp.json()
+    if data.get("type") == "anonymous" or not (data.get("displayName") or data.get("username")):
+        raise RuntimeError(
+            "PAT이 인정되지 않았습니다(익명 사용자로 응답받음) - 토큰을 다시 확인하세요. "
+            "Server/Data Center는 토큰이 틀려도 401 대신 이렇게 응답하는 경우가 있습니다."
+        )
+    name = data.get("displayName") or data.get("username")
+    login = data.get("username") or data.get("email") or ""
+    return f"{name} ({login})" if login and login != name else name
 
 
 def _fetch_page(base_url: str, page_id: str, token: str) -> dict:

@@ -11,6 +11,7 @@ from confluence_agenda.web.docx_export import (
     convert_confluence_url_to_docx,
     is_feature_available,
     resolve_token,
+    verify_token,
 )
 
 
@@ -84,6 +85,58 @@ class ResolveTokenTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertIsNone(resolve_token(None))
             self.assertIsNone(resolve_token("dh.kwon"))
+
+
+class VerifyTokenTest(unittest.TestCase):
+    """PAT 등록 시 Confluence에 직접 물어 유효성/소유자를 확인한다 - Server/DC는
+    틀린 토큰에 401 대신 익명 사용자로 응답하는 경우가 있어서 상태 코드만으로는
+    못 걸러내는 걸 doc2report의 confluence_whoami()에서 참고했다."""
+
+    def setUp(self):
+        self._env_patch = mock.patch.dict(
+            os.environ, {"CONFLUENCE_URL": "https://wiki.example.com"}, clear=True
+        )
+        self._env_patch.start()
+        self.addCleanup(self._env_patch.stop)
+
+    def test_raises_unavailable_when_url_not_configured(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(DocxExportUnavailable):
+                verify_token("some-pat")
+
+    def test_uses_bearer_auth_by_default(self):
+        resp = _fake_response(json_data={"type": "known", "displayName": "권동혁", "username": "dh.kwon"})
+        with mock.patch("requests.get", return_value=resp) as fake_get:
+            verify_token("my-pat")
+
+        self.assertEqual(fake_get.call_args.kwargs["headers"]["Authorization"], "Bearer my-pat")
+
+    def test_401_raises(self):
+        with mock.patch("requests.get", return_value=_fake_response(status_code=401)):
+            with self.assertRaisesRegex(RuntimeError, "올바르지 않습니다"):
+                verify_token("wrong-pat")
+
+    def test_anonymous_response_raises_even_with_200(self):
+        resp = _fake_response(json_data={"type": "anonymous"})
+        with mock.patch("requests.get", return_value=resp):
+            with self.assertRaisesRegex(RuntimeError, "익명 사용자"):
+                verify_token("wrong-pat")
+
+    def test_missing_display_name_and_username_raises(self):
+        resp = _fake_response(json_data={"type": "known"})
+        with mock.patch("requests.get", return_value=resp):
+            with self.assertRaisesRegex(RuntimeError, "익명 사용자"):
+                verify_token("wrong-pat")
+
+    def test_returns_display_name_with_login_when_both_present(self):
+        resp = _fake_response(json_data={"type": "known", "displayName": "권동혁", "username": "dh.kwon"})
+        with mock.patch("requests.get", return_value=resp):
+            self.assertEqual(verify_token("my-pat"), "권동혁 (dh.kwon)")
+
+    def test_returns_just_name_when_no_separate_login(self):
+        resp = _fake_response(json_data={"type": "known", "displayName": "권동혁"})
+        with mock.patch("requests.get", return_value=resp):
+            self.assertEqual(verify_token("my-pat"), "권동혁")
 
 
 class ConvertConfluenceUrlToDocxGuardsTest(unittest.TestCase):

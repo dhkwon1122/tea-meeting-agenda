@@ -32,6 +32,7 @@ from .diagram import build_macro_diagram_html
 from .docx_export import DocxExportUnavailable, convert_confluence_url_to_docx
 from .docx_export import is_feature_available as docx_export_configured
 from .docx_export import resolve_token as resolve_confluence_token
+from .docx_export import verify_token as verify_confluence_token
 
 app = Flask(__name__)
 
@@ -469,11 +470,21 @@ def save_confluence_pat():
         return redirect(f"/?docx_error={quote('PAT을 입력해주세요.')}")
 
     try:
+        owner = verify_confluence_token(pat)
+    except DocxExportUnavailable as e:
+        return redirect(f"/?docx_error={quote(str(e))}")
+    except Exception as e:
+        # PAT이 틀렸거나(401/익명 응답), 서버 연결 자체가 안 되는 경우 -
+        # 등록자가 적은 이름을 그대로 믿지 않고, Confluence가 확인해주지
+        # 못한 토큰은 저장하지 않는다(토큰 도용 방지).
+        return redirect(f"/?docx_error={quote(f'PAT 확인 실패: {e}')}")
+
+    try:
         confluence_credentials.set_pat(current_user["user_id"], pat)
     except confluence_credentials.CredentialStorageUnavailable as e:
         return redirect(f"/?docx_error={quote(str(e))}")
 
-    return redirect(f"/?docx_message={quote('내 Confluence PAT을 저장했습니다.')}")
+    return redirect(f"/?docx_message={quote(f'내 Confluence PAT을 저장했습니다. (확인된 소유자: {owner})')}")
 
 
 @app.route("/confluence-pat/delete", methods=["POST"])

@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from urllib.parse import unquote
 
 from confluence_agenda.builder import build_email_subject
 from confluence_agenda.web import auth, confluence_credentials
@@ -349,22 +350,40 @@ class ConfluenceDocxAndPatTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 302)
         self.assertIn("docx_error=", resp.headers["Location"])
 
-    def test_save_confluence_pat_success_calls_set_pat(self):
+    def test_save_confluence_pat_success_verifies_then_calls_set_pat(self):
         user = {"user_id": "dh.kwon", "display_name": "권동혁"}
-        with mock.patch.object(auth, "get_current_user", return_value=user), mock.patch.object(
-            confluence_credentials, "set_pat"
-        ) as fake_set:
+        with mock.patch.object(auth, "get_current_user", return_value=user), mock.patch(
+            "confluence_agenda.web.app.verify_confluence_token", return_value="권동혁 (dh.kwon)"
+        ) as fake_verify, mock.patch.object(confluence_credentials, "set_pat") as fake_set:
             resp = self.client.post(
                 "/confluence-pat", data={"confluence_pat": "my-new-pat"}, follow_redirects=False
             )
 
+        fake_verify.assert_called_once_with("my-new-pat")
         fake_set.assert_called_once_with("dh.kwon", "my-new-pat")
         self.assertEqual(resp.status_code, 302)
         self.assertIn("docx_message=", resp.headers["Location"])
+        self.assertIn("권동혁", unquote(resp.headers["Location"]))
+
+    def test_save_confluence_pat_verification_failure_does_not_save(self):
+        user = {"user_id": "dh.kwon", "display_name": "권동혁"}
+        with mock.patch.object(auth, "get_current_user", return_value=user), mock.patch(
+            "confluence_agenda.web.app.verify_confluence_token",
+            side_effect=RuntimeError("PAT이 인정되지 않았습니다(익명 사용자로 응답받음)"),
+        ), mock.patch.object(confluence_credentials, "set_pat") as fake_set:
+            resp = self.client.post(
+                "/confluence-pat", data={"confluence_pat": "wrong-pat"}, follow_redirects=False
+            )
+
+        fake_set.assert_not_called()
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("docx_error=", resp.headers["Location"])
 
     def test_save_confluence_pat_storage_unavailable_shows_error(self):
         user = {"user_id": "dh.kwon", "display_name": "권동혁"}
-        with mock.patch.object(auth, "get_current_user", return_value=user), mock.patch.object(
+        with mock.patch.object(auth, "get_current_user", return_value=user), mock.patch(
+            "confluence_agenda.web.app.verify_confluence_token", return_value="권동혁 (dh.kwon)"
+        ), mock.patch.object(
             confluence_credentials,
             "set_pat",
             side_effect=confluence_credentials.CredentialStorageUnavailable("설정이 없습니다"),
