@@ -236,6 +236,42 @@ class ConvertConfluenceUrlToDocxHttpTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Confluence 서버 연결 실패"):
                 convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
 
+    def test_ssl_error_with_default_verify_hints_at_untrusted_corp_ca(self):
+        """CONFLUENCE_CA_BUNDLE 없이(= 기본 인증서로) SSLError가 나면, 사내 루트 CA가
+        신뢰 저장소에 없다는 것과 certs/의 PEM 형식·재빌드 여부를 확인하라는
+        구체적인 안내가 나와야 한다 - 그냥 "SSL 문제일 수 있다"보다 실행 가능해야 함."""
+        import requests as requests_module
+
+        with mock.patch(
+            "requests.get",
+            side_effect=requests_module.exceptions.SSLError(
+                "certificate verify failed: unable to get local issuer certificate"
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "PEM 형식") as ctx:
+                convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+        self.assertIn("기본", str(ctx.exception))
+        self.assertIn("재빌드", str(ctx.exception))
+
+    def test_ssl_error_with_custom_ca_bundle_hints_at_bad_file(self):
+        """CONFLUENCE_CA_BUNDLE을 지정했는데도 SSLError가 나면, 그 파일 자체(진짜
+        루트 CA인지/PEM인지/전체 체인인지)를 확인하라는 안내가 나와야 한다."""
+        import requests as requests_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ca_path = Path(tmp) / "corp-ca.crt"
+            ca_path.write_text("-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----")
+
+            with mock.patch.dict(os.environ, {"CONFLUENCE_CA_BUNDLE": str(ca_path)}), mock.patch(
+                "requests.get",
+                side_effect=requests_module.exceptions.SSLError("self signed certificate in certificate chain"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, str(ca_path)) as ctx:
+                    convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+        self.assertIn("전체", str(ctx.exception))
+
     def test_missing_storage_body_raises(self):
         resp = _fake_response(json_data={"title": "제목", "body": {}})
         with mock.patch("requests.get", return_value=resp):

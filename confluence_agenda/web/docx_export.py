@@ -233,6 +233,44 @@ def _proxies():
     return {"http": None, "https": None} if no_proxy else None
 
 
+def _wrap_connection_error(exc: Exception) -> RuntimeError:
+    """requests가 던지는 연결/SSL 예외를 구체적인 조치 안내로 감싼다.
+
+    SSLError는 원인별로 조치가 전혀 다른데, 화면/로그에는 파이썬 예외
+    텍스트만 짧게 보여서 사용자가 그 안의 세부(자체 서명/체인 불완전/
+    발급자 못 찾음 등)를 매번 옮겨 적어 알려줘야 했다 - 대신 지금 실제로
+    적용 중인 verify 값(_ssl_verify())을 같이 보여줘서, "기본 인증서로도
+    사내 루트 CA를 못 믿는 것"과 "CONFLUENCE_CA_BUNDLE로 지정한 파일 자체가
+    문제인 것"을 구분해 다음에 뭘 확인해야 하는지 바로 알 수 있게 한다.
+    """
+    if isinstance(exc, requests.exceptions.SSLError):
+        verify = _ssl_verify()
+        if verify is True:
+            hint = (
+                "CONFLUENCE_CA_BUNDLE 등을 안 줬거나 지정한 경로에 파일이 없어서 "
+                "기본(시스템) 인증서로 검증했는데도 실패했습니다 - 사내 루트 CA가 "
+                "신뢰 저장소에 없는 것으로 보입니다. Docker로 띄웠다면: "
+                "(1) certs/ 안의 파일을 텍스트 에디터로 열어 '-----BEGIN "
+                "CERTIFICATE-----'로 시작하는 PEM 형식이 맞는지 확인(Windows에서 "
+                "내보낸 .cer/.p7b는 대개 이 형식이 아니라 실패함), "
+                "(2) 고친 뒤 이미지를 다시 빌드했는지 확인(코드만 pull하고 재빌드를 "
+                "안 하면 예전 이미지가 그대로 실행됨)."
+            )
+        else:
+            hint = (
+                f"CONFLUENCE_CA_BUNDLE={verify} 로 검증했는데도 실패했습니다 - 이 "
+                "파일이 실제 사내 루트 CA가 맞는지, PEM 형식인지, 중간 인증서까지 "
+                "포함된 전체 체인인지 확인하세요."
+            )
+        return RuntimeError(f"Confluence 서버 연결 실패(SSL 인증서 검증 실패): {exc}\n{hint}")
+
+    return RuntimeError(
+        f"Confluence 서버 연결 실패: {exc}\n"
+        "사내망 SSL 인증서 문제일 수 있습니다 - CONFLUENCE_CA_BUNDLE 환경변수로 "
+        "사내 루트 인증서(.crt/.pem) 경로를 지정해 보세요."
+    )
+
+
 def verify_token(token: str) -> str:
     """이 PAT이 실제로 유효한지, Confluence가 보기에 누구 것인지 확인한다.
 
@@ -260,11 +298,7 @@ def verify_token(token: str) -> str:
             proxies=_proxies(),
         )
     except (requests.RequestException, OSError) as exc:
-        raise RuntimeError(
-            f"Confluence 서버 연결 실패: {exc}\n"
-            "사내망 SSL 인증서 문제일 수 있습니다 - CONFLUENCE_CA_BUNDLE 환경변수로 "
-            "사내 루트 인증서(.crt/.pem) 경로를 지정해 보세요."
-        ) from exc
+        raise _wrap_connection_error(exc) from exc
 
     if resp.status_code == 401:
         raise RuntimeError("PAT이 올바르지 않습니다(401).")
@@ -386,11 +420,7 @@ def _fetch_page(base_url: str, page_id: str, token: str) -> dict:
             proxies=_proxies(),
         )
     except (requests.RequestException, OSError) as exc:
-        raise RuntimeError(
-            f"Confluence 서버 연결 실패: {exc}\n"
-            "사내망 SSL 인증서 문제일 수 있습니다 - CONFLUENCE_CA_BUNDLE 환경변수로 "
-            "사내 루트 인증서(.crt/.pem) 경로를 지정해 보세요."
-        ) from exc
+        raise _wrap_connection_error(exc) from exc
 
     if resp.status_code == 401:
         raise RuntimeError("Confluence 인증 실패(401). 토큰(PAT)을 확인하세요.")
