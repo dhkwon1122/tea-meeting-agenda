@@ -411,25 +411,44 @@ class ConfluenceDocxAndPatTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 302)
         self.assertIn("docx_message=", resp.headers["Location"])
 
-    def test_index_shows_pat_registered_status_for_logged_in_user(self):
+    def test_docx_page_shows_pat_registered_status_for_logged_in_user(self):
         user = {"user_id": "dh.kwon", "display_name": "권동혁"}
         with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=True), \
              mock.patch.object(auth, "get_current_user", return_value=user), \
              mock.patch.object(confluence_credentials, "is_configured", return_value=True), \
              mock.patch.object(confluence_credentials, "status", return_value=object()):
-            resp = self.client.get("/")
+            resp = self.client.get("/confluence-to-docx")
 
         self.assertIn("등록되어 있습니다".encode(), resp.data)
 
-    def test_index_shows_not_registered_message_when_no_pat_yet(self):
+    def test_docx_page_shows_not_registered_message_when_no_pat_yet(self):
         user = {"user_id": "dh.kwon", "display_name": "권동혁"}
         with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=True), \
              mock.patch.object(auth, "get_current_user", return_value=user), \
              mock.patch.object(confluence_credentials, "is_configured", return_value=True), \
              mock.patch.object(confluence_credentials, "status", return_value=None):
-            resp = self.client.get("/")
+            resp = self.client.get("/confluence-to-docx")
 
         self.assertIn("아직 등록되지 않았습니다".encode(), resp.data)
+
+    def test_docx_page_redirects_to_index_when_feature_not_available(self):
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=False):
+            resp = self.client.get("/confluence-to-docx", follow_redirects=False)
+
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp.headers["Location"], "/")
+
+    def test_index_shows_nav_link_to_docx_page_when_available(self):
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=True):
+            resp = self.client.get("/")
+
+        self.assertIn(b'href="/confluence-to-docx"', resp.data)
+
+    def test_index_hides_nav_link_when_docx_feature_not_available(self):
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=False):
+            resp = self.client.get("/")
+
+        self.assertNotIn(b'href="/confluence-to-docx"', resp.data)
 
 
 class MainStartupGuardTest(unittest.TestCase):
