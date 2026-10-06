@@ -45,6 +45,7 @@ import base64
 import os
 import re
 from io import BytesIO
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 import requests
@@ -195,10 +196,25 @@ _CA_BUNDLE_ENV_VARS = ("CONFLUENCE_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "SSL_CERT_F
 
 
 def _ssl_verify():
+    """CA 인증서 경로를 찾아 반환한다 - 파일이 실제로 있을 때만. requests는
+    verify=에 존재하지 않는 경로를 주면 RequestException이 아니라 그냥
+    OSError를 던져서("Could not find a suitable TLS CA certificate bundle,
+    invalid path: ...") 우리 try/except가 못 잡고 혼란스러운 에러로 샐 수
+    있다 - 특히 Docker로 띄울 때 호스트의 절대경로를 그대로 .env에 넣어두면
+    컨테이너 안에는 그 경로가 없어서 매번 이렇게 깨진다(흔한 실수). 파일이
+    없으면 조용히 기본 인증서로 넘어간다."""
     for key in _CA_BUNDLE_ENV_VARS:
         path = os.environ.get(key, "").strip()
-        if path:
+        if not path:
+            continue
+        if Path(path).is_file():
             return path
+        print(
+            f"[docx_export] {key}={path} 이지만 그 경로에 파일이 없어 무시합니다"
+            "(기본 인증서로 시도). Docker로 띄운 상태라면 호스트 경로가 아니라 "
+            "컨테이너 안에서 보이는 경로를 줘야 합니다 - .env.example의 "
+            "CONFLUENCE_CA_BUNDLE 설명을 참고하세요."
+        )
     return True
 
 
@@ -243,7 +259,7 @@ def verify_token(token: str) -> str:
             verify=_ssl_verify(),
             proxies=_proxies(),
         )
-    except requests.RequestException as exc:
+    except (requests.RequestException, OSError) as exc:
         raise RuntimeError(
             f"Confluence 서버 연결 실패: {exc}\n"
             "사내망 SSL 인증서 문제일 수 있습니다 - CONFLUENCE_CA_BUNDLE 환경변수로 "
@@ -276,7 +292,7 @@ def _fetch_page(base_url: str, page_id: str, token: str) -> dict:
             verify=_ssl_verify(),
             proxies=_proxies(),
         )
-    except requests.RequestException as exc:
+    except (requests.RequestException, OSError) as exc:
         raise RuntimeError(
             f"Confluence 서버 연결 실패: {exc}\n"
             "사내망 SSL 인증서 문제일 수 있습니다 - CONFLUENCE_CA_BUNDLE 환경변수로 "

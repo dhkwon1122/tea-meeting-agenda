@@ -1,6 +1,8 @@
 import io
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from docx import Document as DocxDocument
@@ -195,6 +197,42 @@ class ConvertConfluenceUrlToDocxHttpTest(unittest.TestCase):
     def test_404_raises_not_found_error(self):
         with mock.patch("requests.get", return_value=_fake_response(status_code=404)):
             with self.assertRaisesRegex(RuntimeError, "찾을 수 없습니다"):
+                convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+    def test_ca_bundle_path_that_does_not_exist_falls_back_to_default_verify(self):
+        """Docker 등에서 호스트 절대경로를 그대로 넣어 컨테이너 안에 그 파일이
+        없는 흔한 실수를 흉내낸다 - requests에 존재하지 않는 경로를 그대로
+        넘기면 OSError로 깨지므로, 조용히 기본 인증서(verify=True)로 넘어가야 한다."""
+        env = {"CONFLUENCE_CA_BUNDLE": "/host/only/path/does-not-exist-in-container.crt"}
+        with mock.patch.dict(os.environ, env):
+            resp = _page_response("<p>본문</p>")
+            with mock.patch("requests.get", return_value=resp) as fake_get:
+                convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+        self.assertTrue(fake_get.call_args.kwargs["verify"])
+
+    def test_ca_bundle_path_that_exists_is_used(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ca_path = Path(tmp) / "corp-ca.crt"
+            ca_path.write_text("fake cert contents")
+
+            with mock.patch.dict(os.environ, {"CONFLUENCE_CA_BUNDLE": str(ca_path)}):
+                resp = _page_response("<p>본문</p>")
+                with mock.patch("requests.get", return_value=resp) as fake_get:
+                    convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+            self.assertEqual(fake_get.call_args.kwargs["verify"], str(ca_path))
+
+    def test_oserror_from_bad_verify_path_is_wrapped_as_runtime_error(self):
+        """_ssl_verify()가 못 거른 다른 OSError(권한 문제 등)도 requests.RequestException이
+        아니라서 그냥 두면 밖으로 새어나간다 - 사용자에게 보이는 에러가
+        "변환 실패: Could not find a suitable TLS..." 처럼 혼란스럽지 않도록
+        우리 쪽 "Confluence 서버 연결 실패" 메시지로 감싸야 한다."""
+        with mock.patch(
+            "requests.get",
+            side_effect=OSError("Could not find a suitable TLS CA certificate bundle"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Confluence 서버 연결 실패"):
                 convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
 
     def test_missing_storage_body_raises(self):
