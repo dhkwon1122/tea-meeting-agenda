@@ -11,6 +11,7 @@ from confluence_agenda.web import confluence_credentials, docx_export
 from confluence_agenda.web.docx_export import (
     DocxExportUnavailable,
     convert_confluence_url_to_docx,
+    diagnose_connection,
     is_feature_available,
     resolve_token,
     verify_token,
@@ -476,6 +477,49 @@ class RenderedDocxContentTest(unittest.TestCase):
         )
         data = self._convert(storage)
         self.assertIn("레이아웃 안 내용", _docx_paragraph_texts(data))
+
+
+class DiagnoseConnectionTest(unittest.TestCase):
+    """실제 연결 문제를 추적하는 진단 함수(python -m confluence_agenda.web.confluence_check)."""
+
+    def test_reports_missing_confluence_url(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            lines = diagnose_connection()
+
+        self.assertTrue(any("CONFLUENCE_URL 환경변수가 비어있습니다" in l for l in lines))
+
+    def test_reports_missing_token(self):
+        with mock.patch.dict(os.environ, {"CONFLUENCE_URL": "https://wiki.example.com"}, clear=True):
+            lines = diagnose_connection()
+
+        self.assertTrue(any("쓸 수 있는 토큰(PAT)이 없습니다" in l for l in lines))
+
+    def test_reports_ca_bundle_path_that_does_not_exist(self):
+        env = {
+            "CONFLUENCE_URL": "https://wiki.example.com",
+            "CONFLUENCE_CA_BUNDLE": "/host/only/missing.crt",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            lines = diagnose_connection("my-token")
+
+        self.assertTrue(any("이 경로에 파일이 없음" in l for l in lines))
+
+    def test_reports_success_with_resolved_owner(self):
+        env = {"CONFLUENCE_URL": "https://wiki.example.com"}
+        resp = _fake_response(json_data={"type": "known", "displayName": "권동혁", "username": "dh.kwon"})
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch("requests.get", return_value=resp):
+            lines = diagnose_connection("my-token")
+
+        self.assertTrue(any("연결 성공" in l and "권동혁" in l for l in lines))
+
+    def test_reports_failure_with_exception_detail(self):
+        env = {"CONFLUENCE_URL": "https://wiki.example.com"}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch(
+            "requests.get", side_effect=OSError("boom")
+        ):
+            lines = diagnose_connection("my-token")
+
+        self.assertTrue(any("요청 실패" in l for l in lines))
 
 
 if __name__ == "__main__":

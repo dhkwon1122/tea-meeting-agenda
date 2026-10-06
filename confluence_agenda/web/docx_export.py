@@ -282,6 +282,72 @@ def verify_token(token: str) -> str:
     return f"{name} ({login})" if login and login != name else name
 
 
+def diagnose_connection(token: Optional[str] = None) -> List[str]:
+    """Confluence 연결이 안 될 때 어느 단계에서 막히는지 확인하는 진단 함수.
+
+        python -m confluence_agenda.web.confluence_check [토큰]
+
+    auth.diagnose_login()과 같은 역할 - 화면의 에러 메시지는 뭉뚱그려 보여줄
+    수밖에 없어서(사용자에게 토큰 값 등 민감한 세부를 노출하면 안 됨), 실제
+    원인은 이 함수를 직접 실행해서 추적한다. 이 앱을 띄운 것과 같은 환경
+    (.env 포함, Docker라면 컨테이너 안)에서 실행해야 의미가 있다 - 특히
+    CONFLUENCE_CA_BUNDLE 같은 경로 값은 호스트에서 실행하면 있는 파일이
+    컨테이너 안에는 없을 수 있어서, 반드시 실제 배포 환경에서 돌려봐야 한다.
+    """
+    lines: List[str] = []
+
+    url = os.environ.get("CONFLUENCE_URL", "").strip()
+    if not url:
+        lines.append("✗ CONFLUENCE_URL 환경변수가 비어있습니다.")
+        return lines
+    base_url = _normalize_base_url(url)
+    lines.append(f"✓ CONFLUENCE_URL 설정됨 → 실제 요청 기준 주소: {base_url}")
+
+    effective_token = token or resolve_token(None)
+    if not effective_token:
+        lines.append("✗ 쓸 수 있는 토큰(PAT)이 없습니다 - 인자로 넘기거나 CONFLUENCE_API_TOKEN을 설정하세요.")
+        return lines
+    lines.append(
+        "✓ 토큰 확인됨 (인자로 받음)" if token else "✓ 토큰 확인됨 (CONFLUENCE_API_TOKEN 환경변수)"
+    )
+
+    username = os.environ.get("CONFLUENCE_USERNAME", "").strip()
+    lines.append(
+        f"  인증 방식: Basic(Cloud, CONFLUENCE_USERNAME={username})" if username
+        else "  인증 방식: Bearer(Server/DC, PAT) - CONFLUENCE_USERNAME 비어있음"
+    )
+
+    for key in _CA_BUNDLE_ENV_VARS:
+        path = os.environ.get(key, "").strip()
+        if not path:
+            continue
+        exists = Path(path).is_file()
+        mark = "✓" if exists else "✗"
+        note = "" if exists else " ← 이 경로에 파일이 없음(Docker라면 컨테이너 안 경로가 맞는지 확인)"
+        lines.append(f"{mark} {key}={path}{note}")
+    verify = _ssl_verify()
+    lines.append(f"  실제 적용될 SSL 검증: {verify if verify is not True else '기본 인증서(True)'}")
+
+    no_proxy = _parse_bool_env(os.environ.get("CONFLUENCE_NO_PROXY"), default=False)
+    has_proxy_env = bool(os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY"))
+    lines.append(
+        f"  프록시: CONFLUENCE_NO_PROXY={no_proxy} "
+        f"(HTTP_PROXY/HTTPS_PROXY {'설정됨' if has_proxy_env else '미설정'})"
+    )
+
+    lines.append(f"  보낼 헤더 이름: {sorted(_request_headers(effective_token).keys())}")
+
+    lines.append("→ /rest/api/user/current 로 실제 요청을 보내는 중...")
+    try:
+        owner = verify_token(effective_token)
+    except Exception as exc:  # noqa: BLE001 - 진단 스크립트라 원인 분류 없이 그대로 보여준다
+        lines.append(f"✗ 요청 실패: {type(exc).__name__}: {exc}")
+        return lines
+
+    lines.append(f"✓ 연결 성공 - 확인된 토큰 소유자: {owner}")
+    return lines
+
+
 def _fetch_page(base_url: str, page_id: str, token: str) -> dict:
     try:
         resp = requests.get(
