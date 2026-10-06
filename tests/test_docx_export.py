@@ -427,6 +427,29 @@ class ConvertConfluenceUrlToDocxHttpTest(unittest.TestCase):
         called_url = fake_get.call_args.args[0]
         self.assertIn("99887", called_url)
 
+    def test_on_progress_reports_each_major_step_in_order(self):
+        resp = _page_response("<p>본문</p>")
+        seen = []
+        with mock.patch("requests.get", return_value=resp):
+            convert_confluence_url_to_docx(
+                "https://wiki.example.com/pages/123", token="t", on_progress=seen.append
+            )
+
+        self.assertEqual(
+            seen,
+            ["컨플루언스 페이지 조회 중...", "본문 분석 중...", "Word 문서 생성 중...", "완료"],
+        )
+
+    def test_works_without_on_progress_callback(self):
+        resp = _page_response("<p>본문</p>")
+        with mock.patch("requests.get", return_value=resp):
+            data, filename = convert_confluence_url_to_docx(
+                "https://wiki.example.com/pages/123", token="t"
+            )
+
+        self.assertTrue(data)
+        self.assertEqual(filename, "테스트 문서.docx")
+
 
 class RenderedDocxContentTest(unittest.TestCase):
     """실제로 storage XHTML을 넣었을 때 .docx 본문에 올바른 내용이 들어가는지 확인한다."""

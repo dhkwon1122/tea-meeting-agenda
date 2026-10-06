@@ -1,5 +1,6 @@
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -283,55 +284,85 @@ class ConfluenceDocxAndPatTest(unittest.TestCase):
         app.testing = True
         self.client = app.test_client()
 
-    def test_confluence_to_docx_without_url_redirects_with_error(self):
-        resp = self.client.post(
-            "/confluence-to-docx", data={"confluence_url": ""}, follow_redirects=False
-        )
-        self.assertEqual(resp.status_code, 302)
-        self.assertIn("docx_error=", resp.headers["Location"])
+    def _poll_job_until_finished(self, job_id, *, timeout=2.0):
+        """변환이 백그라운드 스레드에서 돌므로, 끝날 때까지 /status를 짧게 반복
+        확인한다(실제 화면의 JS 폴링과 같은 방식) - 테스트의 경합 상태를 피하려고."""
+        deadline = time.monotonic() + timeout
+        status = None
+        while time.monotonic() < deadline:
+            status = self.client.get(f"/confluence-to-docx/status/{job_id}").get_json()
+            if status["status"] != "running":
+                return status
+            time.sleep(0.02)
+        self.fail(f"작업이 {timeout}초 안에 끝나지 않음: {status}")
 
-    def test_confluence_to_docx_without_token_redirects_with_error(self):
+    def test_confluence_to_docx_start_without_url_returns_error(self):
+        resp = self.client.post("/confluence-to-docx/start", data={"confluence_url": ""})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("URL", resp.get_json()["error"])
+
+    def test_confluence_to_docx_start_without_token_returns_error(self):
         with mock.patch.dict("os.environ", {}, clear=True):
             resp = self.client.post(
-                "/confluence-to-docx",
+                "/confluence-to-docx/start",
                 data={"confluence_url": "https://wiki.example.com/pages/123"},
-                follow_redirects=False,
             )
-        self.assertEqual(resp.status_code, 302)
-        self.assertIn("PAT", resp.headers["Location"])
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("PAT", resp.get_json()["error"])
 
-    def test_confluence_to_docx_success_sends_file(self):
+    def test_confluence_to_docx_job_flow_reports_progress_then_downloads_file(self):
         env = {"CONFLUENCE_API_TOKEN": "global-token"}
+
+        def fake_convert(url, *, token, on_progress=None):
+            if on_progress:
+                on_progress("테스트 진행 중...")
+            return b"docx-bytes", "report.docx"
+
         with mock.patch.dict("os.environ", env, clear=True), mock.patch(
-            "confluence_agenda.web.app.convert_confluence_url_to_docx",
-            return_value=(b"docx-bytes", "report.docx"),
-        ) as fake_convert:
-            resp = self.client.post(
-                "/confluence-to-docx",
+            "confluence_agenda.web.app.convert_confluence_url_to_docx", side_effect=fake_convert
+        ) as fake:
+            start_resp = self.client.post(
+                "/confluence-to-docx/start",
                 data={"confluence_url": "https://wiki.example.com/pages/123"},
-                follow_redirects=False,
             )
+            self.assertEqual(start_resp.status_code, 200)
+            job_id = start_resp.get_json()["job_id"]
 
-        fake_convert.assert_called_once_with(
-            "https://wiki.example.com/pages/123", token="global-token"
-        )
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.data, b"docx-bytes")
-        self.assertIn("report.docx", resp.headers["Content-Disposition"])
+            status = self._poll_job_until_finished(job_id)
+            self.assertEqual(status["status"], "done")
 
-    def test_confluence_to_docx_unavailable_error_redirects_with_message(self):
+            download_resp = self.client.get(f"/confluence-to-docx/download/{job_id}")
+
+        fake.assert_called_once()
+        self.assertEqual(fake.call_args.kwargs["token"], "global-token")
+        self.assertEqual(download_resp.status_code, 200)
+        self.assertEqual(download_resp.data, b"docx-bytes")
+        self.assertIn("report.docx", download_resp.headers["Content-Disposition"])
+
+    def test_confluence_to_docx_job_reports_conversion_error(self):
         env = {"CONFLUENCE_API_TOKEN": "global-token"}
         with mock.patch.dict("os.environ", env, clear=True), mock.patch(
             "confluence_agenda.web.app.convert_confluence_url_to_docx",
             side_effect=DocxExportUnavailable("python-docx/lxml이 설치되지 않았습니다."),
         ):
-            resp = self.client.post(
-                "/confluence-to-docx",
+            start_resp = self.client.post(
+                "/confluence-to-docx/start",
                 data={"confluence_url": "https://wiki.example.com/pages/123"},
-                follow_redirects=False,
             )
+            job_id = start_resp.get_json()["job_id"]
+            status = self._poll_job_until_finished(job_id)
+
+        self.assertEqual(status["status"], "error")
+        self.assertIn("python-docx/lxml", status["message"])
+
+    def test_confluence_to_docx_download_of_unknown_job_redirects_with_error(self):
+        resp = self.client.get("/confluence-to-docx/download/not-a-real-job", follow_redirects=False)
         self.assertEqual(resp.status_code, 302)
         self.assertIn("docx_error=", resp.headers["Location"])
+
+    def test_confluence_to_docx_status_of_unknown_job_returns_404(self):
+        resp = self.client.get("/confluence-to-docx/status/not-a-real-job")
+        self.assertEqual(resp.status_code, 404)
 
     def test_save_confluence_pat_requires_login(self):
         with mock.patch.object(auth, "get_current_user", return_value=None):

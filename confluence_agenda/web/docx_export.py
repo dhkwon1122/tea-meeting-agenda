@@ -46,7 +46,7 @@ import os
 import re
 from io import BytesIO
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import requests
 
@@ -636,12 +636,24 @@ def _safe_filename(title: str) -> str:
     return (cleaned or "report") + ".docx"
 
 
-def convert_confluence_url_to_docx(url: str, *, token: Optional[str] = None) -> Tuple[bytes, str]:
+def convert_confluence_url_to_docx(
+    url: str,
+    *,
+    token: Optional[str] = None,
+    on_progress: Optional[Callable[[str], None]] = None,
+) -> Tuple[bytes, str]:
     """Confluence 페이지 URL을 받아 (.docx 바이트, 파일명)을 돌려준다.
 
     token을 안 주면 전역 CONFLUENCE_API_TOKEN을 쓴다 - 호출부(app.py)는 보통
     resolve_token()으로 사용자별 토큰을 먼저 구해서 넘긴다.
+
+    on_progress(단계 설명)를 주면 주요 단계(조회/분석/생성)마다 호출한다 -
+    페이지 조회가 사내망을 거치면 몇 초~몇십 초 걸릴 수 있어서, 변환이 멈춘
+    것처럼 보이지 않게 화면에 지금 뭘 하고 있는지 보여주려고 만든 것이다
+    (app.py가 백그라운드 스레드로 돌리면서 이 콜백으로 진행 상황을 기록한다).
     """
+    say = on_progress or (lambda message: None)
+
     if not _rendering_dependencies_installed():
         raise DocxExportUnavailable(
             "python-docx/lxml이 설치되지 않았습니다. requirements.txt를 다시 설치해주세요."
@@ -666,6 +678,7 @@ def convert_confluence_url_to_docx(url: str, *, token: Optional[str] = None) -> 
             "'/pages/123456', '?pageId=123456' 형태이거나 페이지 ID 숫자 자체여야 합니다."
         )
 
+    say("컨플루언스 페이지 조회 중...")
     base_url = _normalize_base_url(os.environ.get("CONFLUENCE_URL", "").strip())
     page = _fetch_page(base_url, page_id, effective_token)
 
@@ -673,7 +686,11 @@ def convert_confluence_url_to_docx(url: str, *, token: Optional[str] = None) -> 
     if not storage_html:
         raise RuntimeError(f"페이지 {page_id}에 storage 본문이 없습니다. 접근 권한을 확인하세요.")
 
+    say("본문 분석 중...")
     title = page.get("title") or url
     root = _parse_storage(storage_html)
+
+    say("Word 문서 생성 중...")
     data = _render_document(title, root)
+    say("완료")
     return data, _safe_filename(title)

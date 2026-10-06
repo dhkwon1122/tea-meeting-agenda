@@ -14,6 +14,9 @@ from __future__ import annotations
 
 import io
 import os
+import threading
+import uuid
+from datetime import datetime, timedelta
 from typing import List, Optional
 from urllib.parse import quote
 
@@ -372,16 +375,74 @@ CONFLUENCE_DOCX_PAGE_TEMPLATE = """
 
   <div class="card">
     <h2>변환</h2>
-    <form method="post" action="/confluence-to-docx">
+    <form id="convert-form">
       <div class="field">
         <label for="confluence_url">컨플루언스 페이지 URL</label>
         <input type="text" id="confluence_url" name="confluence_url"
                placeholder="https://wiki.사내주소/pages/viewpage.action?pageId=123456">
       </div>
-      <button class="primary" type="submit">Word로 변환해서 받기</button>
+      <button class="primary" type="submit" id="convert-submit">Word로 변환해서 받기</button>
+      <p id="convert-progress" class="subtitle" style="margin:12px 0 0; display:none;"></p>
     </form>
   </div>
 </div>
+
+<script>
+  (function () {
+    var form = document.getElementById('convert-form');
+    var submitBtn = document.getElementById('convert-submit');
+    var progressEl = document.getElementById('convert-progress');
+
+    function showProgress(text) {
+      progressEl.textContent = text;
+      progressEl.style.display = 'block';
+    }
+
+    form.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      submitBtn.disabled = true;
+      showProgress('시작하는 중...');
+
+      fetch('/confluence-to-docx/start', { method: 'POST', body: new FormData(form) })
+        .then(function (resp) { return resp.json().then(function (body) { return [resp.ok, body]; }); })
+        .then(function (result) {
+          var ok = result[0], body = result[1];
+          if (!ok) {
+            showProgress(body.error || '시작하지 못했습니다.');
+            submitBtn.disabled = false;
+            return;
+          }
+          poll(body.job_id);
+        })
+        .catch(function (err) {
+          showProgress('요청 실패: ' + err);
+          submitBtn.disabled = false;
+        });
+    });
+
+    function poll(jobId) {
+      fetch('/confluence-to-docx/status/' + jobId)
+        .then(function (resp) { return resp.json(); })
+        .then(function (status) {
+          if (status.status === 'running') {
+            showProgress(status.message);
+            setTimeout(function () { poll(jobId); }, 800);
+          } else if (status.status === 'done') {
+            showProgress('완료 - 다운로드를 시작합니다.');
+            window.location = '/confluence-to-docx/download/' + jobId;
+            submitBtn.disabled = false;
+          } else {
+            showProgress(status.message || '변환에 실패했습니다.');
+            submitBtn.disabled = false;
+          }
+        })
+        .catch(function (err) {
+          showProgress('상태 확인 실패: ' + err);
+          submitBtn.disabled = false;
+        });
+    }
+  })();
+</script>
 </body>
 </html>
 """
@@ -489,32 +550,94 @@ def confluence_docx_page():
     )
 
 
-@app.route("/confluence-to-docx", methods=["POST"])
-def confluence_to_docx():
+# 컨플루언스 조회가 사내망을 거치면 몇 초~몇십 초 걸릴 수 있는데, 평범한 폼
+# POST는 끝날 때까지 화면이 그냥 멈춰 있는 것처럼 보여서(사용자 피드백: "중간
+# 프로그레스를 알 수가 없어서 답답해") 백그라운드 스레드로 돌리고 화면이
+# /status를 주기적으로 물어 지금 뭘 하고 있는지 보여주는 방식으로 바꿨다.
+# 사내 소규모 팀 도구라 이 정도 메모리 상태(프로세스 안 dict)로 충분하고,
+# 별도 작업 큐(Celery 등)를 들일 필요는 없다고 판단.
+_conversion_jobs: dict = {}
+_conversion_jobs_lock = threading.Lock()
+_JOB_TTL = timedelta(minutes=15)
+
+
+def _prune_old_jobs_locked() -> None:
+    cutoff = datetime.utcnow() - _JOB_TTL
+    for job_id in [jid for jid, job in _conversion_jobs.items() if job["created_at"] < cutoff]:
+        _conversion_jobs.pop(job_id, None)
+
+
+def _update_job(job_id: str, **fields) -> None:
+    with _conversion_jobs_lock:
+        job = _conversion_jobs.get(job_id)
+        if job is not None:
+            job.update(fields)
+
+
+@app.route("/confluence-to-docx/start", methods=["POST"])
+def start_confluence_to_docx():
     url = request.form.get("confluence_url", "").strip()
     if not url:
-        return redirect(f"/confluence-to-docx?docx_error={quote('컨플루언스 페이지 URL을 입력해주세요.')}")
+        return {"error": "컨플루언스 페이지 URL을 입력해주세요."}, 400
 
     current_user = auth.get_current_user()
     token = resolve_confluence_token(current_user["user_id"] if current_user else None)
     if not token:
+        return {"error": "Confluence 개인 액세스 토큰(PAT)이 없습니다. 아래에서 내 PAT을 등록해주세요."}, 400
+
+    job_id = uuid.uuid4().hex
+    with _conversion_jobs_lock:
+        _prune_old_jobs_locked()
+        _conversion_jobs[job_id] = {
+            "status": "running",
+            "message": "시작하는 중...",
+            "data": None,
+            "filename": None,
+            "created_at": datetime.utcnow(),
+        }
+
+    def run() -> None:
+        try:
+            data, filename = convert_confluence_url_to_docx(
+                url, token=token, on_progress=lambda message: _update_job(job_id, message=message)
+            )
+            _update_job(job_id, status="done", message="완료", data=data, filename=filename)
+        except DocxExportUnavailable as e:
+            _update_job(job_id, status="error", message=str(e))
+        except Exception as e:
+            # 페이지를 못 찾음/권한 없음/네트워크 오류 등 docx_export.py가 던지는 오류.
+            _update_job(job_id, status="error", message=f"변환 실패: {e}")
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"job_id": job_id}
+
+
+@app.route("/confluence-to-docx/status/<job_id>")
+def confluence_to_docx_status(job_id):
+    with _conversion_jobs_lock:
+        job = _conversion_jobs.get(job_id)
+    if job is None:
+        return {"status": "error", "message": "작업을 찾을 수 없습니다(만료되었거나 서버가 재시작됐을 수 있음)."}, 404
+    return {"status": job["status"], "message": job["message"]}
+
+
+@app.route("/confluence-to-docx/download/<job_id>")
+def confluence_to_docx_download(job_id):
+    with _conversion_jobs_lock:
+        job = _conversion_jobs.get(job_id)
+        if job is not None and job["status"] == "done":
+            # 한 번 받으면 정리 - 토큰이 든 작업을 메모리에 계속 남겨둘 필요 없음.
+            _conversion_jobs.pop(job_id, None)
+
+    if job is None or job["status"] != "done":
         return redirect(
-            f"/confluence-to-docx?docx_error="
-            f"{quote('Confluence 개인 액세스 토큰(PAT)이 없습니다. 아래에서 내 PAT을 등록해주세요.')}"
+            f"/confluence-to-docx?docx_error={quote('파일을 찾을 수 없습니다(만료되었을 수 있음) - 다시 시도해주세요.')}"
         )
 
-    try:
-        data, filename = convert_confluence_url_to_docx(url, token=token)
-    except DocxExportUnavailable as e:
-        return redirect(f"/confluence-to-docx?docx_error={quote(str(e))}")
-    except Exception as e:
-        # 페이지를 못 찾음/권한 없음/네트워크 오류 등 docx_export.py가 던지는 오류.
-        return redirect(f"/confluence-to-docx?docx_error={quote(f'변환 실패: {e}')}")
-
     return send_file(
-        io.BytesIO(data),
+        io.BytesIO(job["data"]),
         as_attachment=True,
-        download_name=filename,
+        download_name=job["filename"],
         mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
 
@@ -674,7 +797,10 @@ def main() -> None:
         )
     port = int(os.environ.get("PORT", "10001"))
     # threaded=True: 컨플루언스 -> Word 변환은 몇 초~몇십 초 걸릴 수 있어서,
-    # 그동안 다른 요청(안건 소스 생성 등)이 막히지 않게 한다.
+    # 백그라운드 스레드(start_confluence_to_docx)로 돌리고 화면이 /status를
+    # 주기적으로 물어 진행 상황을 보여준다 - 그 폴링 요청들과 변환 작업
+    # 자체가 동시에 처리돼야 하고, 그동안 다른 요청(안건 소스 생성 등)도
+    # 막히면 안 된다.
     app.run(host="0.0.0.0", port=port, threaded=True)
 
 
