@@ -521,6 +521,39 @@ class DiagnoseConnectionTest(unittest.TestCase):
 
         self.assertTrue(any("요청 실패" in l for l in lines))
 
+    def test_reports_exact_request_url(self):
+        env = {"CONFLUENCE_URL": "https://wiki.example.com"}
+        resp = _fake_response(json_data={"type": "known", "displayName": "권동혁"})
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch("requests.get", return_value=resp):
+            lines = diagnose_connection("my-token")
+
+        self.assertTrue(
+            any("https://wiki.example.com/rest/api/user/current" in l for l in lines)
+        )
+
+    def test_reports_dep_ticket_unset_as_possible_cause_on_failure(self):
+        env = {"CONFLUENCE_URL": "https://wiki.example.com"}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch(
+            "requests.get", return_value=_fake_response(status_code=403)
+        ):
+            lines = diagnose_connection("my-token")
+
+        self.assertTrue(any("✗ CONFLUENCE_DEP_TICKET 미설정" in l for l in lines))
+        self.assertTrue(any("이게 원인일 가능성이 높다" in l for l in lines))
+
+    def test_reports_dep_ticket_and_data_classification_when_set(self):
+        env = {
+            "CONFLUENCE_URL": "https://wiki.example.com",
+            "CONFLUENCE_DEP_TICKET": "DEP-1234",
+            "CONFLUENCE_DATA_CLASSIFICATION": "internal",
+        }
+        resp = _fake_response(json_data={"type": "known", "displayName": "권동혁"})
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch("requests.get", return_value=resp):
+            lines = diagnose_connection("my-token")
+
+        self.assertTrue(any("✓ CONFLUENCE_DEP_TICKET 설정됨" in l for l in lines))
+        self.assertTrue(any("✓ CONFLUENCE_DATA_CLASSIFICATION 설정됨" in l for l in lines))
+
 
 if __name__ == "__main__":
     unittest.main()

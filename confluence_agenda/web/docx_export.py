@@ -335,16 +335,43 @@ def diagnose_connection(token: Optional[str] = None) -> List[str]:
         f"(HTTP_PROXY/HTTPS_PROXY {'설정됨' if has_proxy_env else '미설정'})"
     )
 
-    lines.append(f"  보낼 헤더 이름: {sorted(_request_headers(effective_token).keys())}")
+    # X-Dep-Ticket/X-Data-Classification - 표준 Confluence API 스펙이 아니라
+    # 사내 게이트웨이가 요구하는 보안 정책 헤더다. dhkwon1122/Researcher-board가
+    # 같은 사내 Confluence를 2026-09월에 조회할 때, 보안정책이 바뀌면서 이
+    # 헤더 없이는 403이 났고 값을 채운 뒤에야 됐다는 기록이 있다 - 등록이
+    # 막힌다면 가장 먼저 의심해볼 것(IT/보안팀에서 티켓 번호·분류값을 받아
+    # CONFLUENCE_DEP_TICKET/CONFLUENCE_DATA_CLASSIFICATION에 넣어야 함).
+    dep_ticket_set = bool(os.environ.get("CONFLUENCE_DEP_TICKET", "").strip())
+    data_class_set = bool(os.environ.get("CONFLUENCE_DATA_CLASSIFICATION", "").strip())
+    lines.append(
+        f"  {'✓' if dep_ticket_set else '✗'} CONFLUENCE_DEP_TICKET "
+        f"{'설정됨' if dep_ticket_set else '미설정'}"
+        + ("" if dep_ticket_set else " ← 사내 게이트웨이가 이 헤더를 요구할 수 있음(IT/보안팀 문의)")
+    )
+    lines.append(
+        f"  {'✓' if data_class_set else '✗'} CONFLUENCE_DATA_CLASSIFICATION "
+        f"{'설정됨' if data_class_set else '미설정'}"
+    )
 
-    lines.append("→ /rest/api/user/current 로 실제 요청을 보내는 중...")
+    headers = _request_headers(effective_token)
+    lines.append(f"  보낼 헤더 이름: {sorted(headers.keys())}")
+
+    verify_url = f"{base_url}/rest/api/user/current"
+    lines.append(f"→ 실제 요청 URL: GET {verify_url}")
     try:
         owner = verify_token(effective_token)
     except Exception as exc:  # noqa: BLE001 - 진단 스크립트라 원인 분류 없이 그대로 보여준다
         lines.append(f"✗ 요청 실패: {type(exc).__name__}: {exc}")
+        if not dep_ticket_set:
+            lines.append(
+                "  ↳ CONFLUENCE_DEP_TICKET이 비어있는데 403/401이 났다면 이게 원인일 가능성이 높다."
+            )
         return lines
 
     lines.append(f"✓ 연결 성공 - 확인된 토큰 소유자: {owner}")
+    lines.append(
+        f"  (참고) 실제 페이지 조회 시 URL 형태: {base_url}/rest/api/content/<페이지ID>"
+    )
     return lines
 
 
