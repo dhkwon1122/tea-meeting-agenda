@@ -1,31 +1,48 @@
 """Confluence 페이지를 조회해 Word(.docx)로 변환하는 기능.
 
-wcoffee77/document-parsing(doc2report)을 그대로 가져와 쓴다. 그 저장소의
-pipeline.convert()가 "URL -> REST API로 storage XHTML 조회 -> 레이아웃 계산
--> .docx 저장"을 전부 처리하므로, 여기서는 얇게 감싸서 Flask 라우트에서 쓰기
-좋은 형태(바이트 + 파일명)로 바꾸는 역할만 한다. 계정 등록 화면이나 토큰
+wcoffee77/document-parsing(doc2report)의 코드를 그대로 가져와 쓴다. 그
+저장소의 pipeline.convert()가 "URL -> REST API로 storage XHTML 조회 -> 레이아웃
+계산 -> .docx 저장"을 전부 처리하므로, 여기서는 얇게 감싸서 Flask 라우트에서
+쓰기 좋은 형태(바이트 + 파일명)로 바꾸는 역할만 한다. 계정 등록 화면이나 토큰
 암호화 저장 같은 그쪽 전용 UI(web/server.py, account.py)는 가져오지 않았다 -
 대신 이 앱 자신의 로그인(auth.py)에 묶어 confluence_credentials.py가 사용자별
 PAT을 저장한다.
+
+doc2report는 pip 패키지로 받지 않는다 - requirements.txt에 `doc2report @
+git+https://...`로 넣었다가, 사내망에서 Docker 빌드 중 `git clone` 자체가
+막혀서(2026-10 보고) 빌드가 실패했다. 그래서 그 저장소의 소스를 통째로
+vendor/document-parsing/에 복사해 두고(특정 커밋 고정, vendor/document-parsing/
+README.md 참고) 이 파일이 import 시점에 그 경로를 sys.path에 추가한다 - 빌드
+중 깃을 쓸 일이 전혀 없고, python-docx/lxml/pydantic 등 doc2report 자신의
+의존성만 requirements.txt에서 일반 PyPI 패키지로 받는다.
 
 CONFLUENCE_URL이 없으면 이 기능 자체가 꺼진다(is_feature_available() False).
 토큰(PAT)은 두 가지 경로를 지원한다:
   1. 사용자별 등록 (confluence_credentials.py, 로그인 DB에 암호화 저장) - 우선.
   2. 전역 CONFLUENCE_API_TOKEN 환경변수 - 사용자별 등록이 없을 때 fallback
      (로그인 기능을 안 쓰는 배포, 또는 CLI 전용 사용 등).
-doc2report가 설치되지 않은 환경에서도 나머지 기능은 그대로 쓸 수 있다.
+doc2report 자신의 의존성이 설치되지 않은 환경에서도 나머지 기능은 그대로
+쓸 수 있다(아래 _doc2report_installed()가 import 실패를 흡수함).
 """
 
 from __future__ import annotations
 
 import os
 import re
+import sys
 import tempfile
 import threading
 from pathlib import Path
 from typing import Optional, Tuple
 
 from . import confluence_credentials
+
+# vendor/document-parsing/src/doc2report - wcoffee77/document-parsing의 소스를
+# 그대로 복사해 둔 것(git 의존성 대신). 이 파일 기준 두 단계 위가 저장소 루트다
+# (confluence_agenda/web/docx_export.py -> confluence_agenda/web -> confluence_agenda -> 루트).
+_VENDOR_SRC = str(Path(__file__).resolve().parents[2] / "vendor" / "document-parsing" / "src")
+if _VENDOR_SRC not in sys.path:
+    sys.path.insert(0, _VENDOR_SRC)
 
 
 class DocxExportUnavailable(RuntimeError):

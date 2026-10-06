@@ -7,12 +7,20 @@ flask>=3,<4
 sqlalchemy>=2,<3
 psycopg2-binary>=2,<3
 
-# 컨플루언스 문서 → Word 변환(선택) - wcoffee77/document-parsing(doc2report)을
-# 그대로 가져와 쓴다. CONFLUENCE_URL/CONFLUENCE_API_TOKEN을 안 설정하면
-# 이 패키지가 없어도 앱은 그대로 동작한다(confluence_agenda/web/docx_export.py가
-# import 실패를 흡수함). 특정 커밋에 고정 - 업데이트하려면 이 해시를
-# wcoffee77/document-parsing의 최신 커밋으로 바꿀 것.
-doc2report @ git+https://github.com/wcoffee77/document-parsing.git@ce706e5603209a149e6042b5ae296b9cc1d51d53
+# 컨플루언스 문서 → Word 변환(선택) - doc2report(wcoffee77/document-parsing) 자신의
+# 의존성. doc2report 코드는 pip로 안 받고 vendor/document-parsing/에 소스를 통째로
+# 복사해 둔다(vendor/document-parsing/README.md 참고) - git+https pip 의존성으로
+# 받다가 사내망에서 Docker 빌드 중 git clone이 막혀 실패했기 때문. 여기 패키지들은
+# 전부 보통의 PyPI 패키지라 그 문제와 무관하다. CONFLUENCE_URL/CONFLUENCE_API_TOKEN을
+# 안 설정하면 이 패키지들이 없어도 앱은 그대로 동작한다
+# (confluence_agenda/web/docx_export.py가 import 실패를 흡수함).
+python-docx>=1.1.2
+markdown-it-py>=3.0.0
+lxml>=5.2.0
+fonttools>=4.53.0
+pydantic>=2.7.0
+PyYAML>=6.0
+httpx>=0.27.0
 
 # 사용자별 Confluence PAT을 DB에 암호화 저장(선택) - CREDENTIAL_ENCRYPTION_KEY를
 # 설정할 때만 필요. 안 쓰면 이 패키지가 없어도 앱은 그대로 동작한다

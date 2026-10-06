@@ -23,13 +23,17 @@ def _fake_doc2report_modules(convert_fn=None):
     return {"doc2report": pkg, "doc2report.pipeline": pipeline_mod}
 
 
-def _without_doc2report():
-    return {k: v for k, v in sys.modules.items() if not k.startswith("doc2report")}
+def _simulate_doc2report_not_installed():
+    """doc2report는 이제 vendor/document-parsing/에 소스로 들어있어 디스크에서
+    지울 수 없다(그 디렉터리 자체가 사라지지 않는 한 항상 import 가능) - 그래서
+    sys.modules에 None을 넣어 "이 이름은 import할 수 없다"고 못박는, CPython
+    import 시스템이 공식적으로 지원하는 방법으로 설치 안 된 상태를 흉내낸다."""
+    return {"doc2report": None, "doc2report.pipeline": None}
 
 
 class IsFeatureAvailableTest(unittest.TestCase):
     def test_false_when_doc2report_not_installed(self):
-        with mock.patch.dict(sys.modules, _without_doc2report(), clear=True), mock.patch.dict(
+        with mock.patch.dict(sys.modules, _simulate_doc2report_not_installed()), mock.patch.dict(
             os.environ, {"CONFLUENCE_URL": "https://wiki.example.com", "CONFLUENCE_API_TOKEN": "t"}, clear=True
         ):
             self.assertFalse(is_feature_available())
@@ -85,7 +89,7 @@ class ResolveTokenTest(unittest.TestCase):
 
 class ConvertConfluenceUrlToDocxTest(unittest.TestCase):
     def test_raises_unavailable_when_doc2report_not_installed(self):
-        with mock.patch.dict(sys.modules, _without_doc2report(), clear=True):
+        with mock.patch.dict(sys.modules, _simulate_doc2report_not_installed()):
             with self.assertRaisesRegex(DocxExportUnavailable, "설치되지 않았습니다"):
                 convert_confluence_url_to_docx("https://wiki.example.com/pages/123456", token="t")
 

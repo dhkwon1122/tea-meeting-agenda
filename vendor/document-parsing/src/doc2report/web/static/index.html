@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>doc2report 보고서 변환</title>
+<link rel="stylesheet" href="/static/app.css">
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <h1>doc2report</h1>
+    <span class="sub">Confluence·Word·메모 → 사내 규격 보고서</span>
+  </div>
+  <div class="status" id="status">
+    <button class="chip user" id="st-user" type="button" title="사용자 등록·변경">사용자 확인 중…</button>
+    <span class="chip" id="st-confluence">Confluence 확인 중…</span>
+    <span class="chip" id="st-llm">LLM 확인 중…</span>
+    <span class="chip" id="st-pdf">PDF 확인 중…</span>
+  </div>
+</header>
+
+<div id="banner" class="banner hidden" role="alert"></div>
+
+<main class="layout">
+  <!-- 1. 입력 -->
+  <section class="card" id="card-input">
+    <h2><span class="num">1</span>입력</h2>
+    <div class="tabs" role="tablist">
+      <button class="tab active" data-tab="confluence" role="tab">Confluence 주소</button>
+      <button class="tab" data-tab="docx" role="tab">Word 파일</button>
+      <button class="tab" data-tab="text" role="tab">글 붙여넣기</button>
+    </div>
+
+    <div class="panel" data-panel="confluence">
+      <textarea id="cf-urls" rows="3" placeholder="페이지 주소를 붙여 넣으세요. 여러 페이지는 한 줄에 하나씩.&#10;예) https://confluence.회사/pages/viewpage.action?pageId=123456"></textarea>
+      <div class="row">
+        <button class="btn" id="cf-add">목록에 추가</button>
+        <span class="hint">추가하면 제목을 불러와 주소가 맞는지 확인합니다.</span>
+      </div>
+      <label class="check"><input type="checkbox" id="cf-linked" checked> 본문에 연결된 페이지도 함께 불러오기
+        <span class="hint">"페이지 포함"·"발췌 포함"(펼치기 + 안에 넣은 것 포함)·"하위 페이지" 매크로가 가리키는 페이지와
+          첨부 Word 파일을 넣습니다. 불러온 문서는 새 쪽에서 그 문서 제목과 함께 시작합니다(발췌는 그 자리에).
+          최대 40쪽·4단계.</span></label>
+    </div>
+
+    <div class="panel hidden" data-panel="docx">
+      <label class="drop" id="drop">
+        <input type="file" id="file-input" accept=".docx" multiple hidden>
+        <strong>Word(.docx) 파일을 여기에 끌어 놓거나 눌러서 고르세요</strong>
+        <span class="hint">여러 개 가능 · 50MB 이하 · .doc은 Word에서 .docx로 저장 후</span>
+      </label>
+    </div>
+
+    <div class="panel hidden" data-panel="text">
+      <input type="text" id="tx-title" placeholder="이 글의 제목 (선택)">
+      <textarea id="tx-body" rows="8" placeholder="메일·메신저·메모 내용을 그대로 붙여 넣으세요.&#10;한 줄이 한 문단이 됩니다. 엑셀에서 복사한 표(탭으로 나뉜 칸)는 표로 바뀝니다."></textarea>
+      <div class="row"><button class="btn" id="tx-add">목록에 추가</button></div>
+    </div>
+
+    <h3>입력 목록 <span class="hint">위에서부터 차례로 합쳐 한 문서가 됩니다</span></h3>
+    <ol class="inputs" id="input-list"></ol>
+    <p class="empty" id="input-empty">아직 입력이 없습니다.</p>
+  </section>
+
+  <!-- 2. 옵션 -->
+  <section class="card" id="card-options">
+    <h2><span class="num">2</span>변환 옵션</h2>
+    <div class="segmented" role="radiogroup">
+      <label><input type="radio" name="mode" value="auto" checked><span>자동 판단</span></label>
+      <label><input type="radio" name="mode" value="manual"><span>직접 선택</span></label>
+    </div>
+
+    <div id="auto-panel">
+      <p class="explain">문서를 읽어 보고 정합니다.</p>
+      <ul class="explain-list">
+        <li><b>정리된 문서</b>(Confluence 페이지, 제목·말머리가 있는 글) → 원문 문장·말머리 유지</li>
+        <li><b>정리 안 된 글</b> → 말머리를 만들고 파이썬 규칙으로 문장을 개조식으로 다듬음</li>
+        <li><b>내용이 많은데</b>(<span id="auto-heavy">…</span>) 보고서 서식이면 → Confluence 변환 서식을 권함(서식은 고른 그대로)</li>
+      </ul>
+    </div>
+
+    <div id="manual-panel" class="hidden">
+      <label class="inline">규칙 기본값 <select id="rules-base"></select></label>
+      <p class="hint">고른 서식의 기본 규칙으로 아래를 채웁니다. 글꼴·크기·여백은 오른쪽 "출력"의 서식에서 고릅니다.</p>
+
+      <fieldset>
+        <legend>문장 다듬기 (파이썬 규칙)</legend>
+        <div class="segmented small" role="radiogroup">
+          <label><input type="radio" name="polish" value="none"><span>안 함</span></label>
+          <label><input type="radio" name="polish" value="rules"><span>파이썬 규칙 적용</span></label>
+        </div>
+        <div id="polish-rules" class="checks"></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>말머리</legend>
+        <div id="marker-rules" class="checks"></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>표</legend>
+        <label class="check"><input type="checkbox" id="tbl-landscape"> 넓은 표는 가로 페이지 허용</label>
+        <label class="inline">표 위치 <select id="tbl-align"></select></label>
+      </fieldset>
+    </div>
+
+    <fieldset>
+      <legend>LLM 다듬기</legend>
+      <label class="check strong"><input type="checkbox" id="use-llm"> LLM으로 맞춤법·표현·어조 다듬기
+        <span class="hint">맞춤법·띄어쓰기를 고치고, 정식 보고서 어조로 바꾸고, 모호한 표현을 분명하게 합니다.
+          사실·수치와 문장 끝 형태는 그대로 두고, 제목과 표 안은 건드리지 않습니다.</span></label>
+      <div class="row">
+        <button class="btn ghost" id="llm-test">LLM 연결 시험</button>
+        <span class="hint" id="llm-test-out"></span>
+      </div>
+    </fieldset>
+
+    <fieldset id="merge-box">
+      <legend>여러 입력 합치기</legend>
+      <label class="check"><input type="radio" name="merge" value="continuous" checked> 쪽 구분 없이 이어 붙이기
+        <span class="hint">각 입력은 제목을 절 제목으로 넣어 구분</span></label>
+      <label class="check"><input type="radio" name="merge" value="pages"> 입력마다 새 쪽에서 시작
+        <span class="hint">쪽마다 그 입력의 제목을 큰 제목(가운데·밑줄)으로. 위 "문서 제목"은 파일 이름에 씀</span></label>
+    </fieldset>
+  </section>
+
+  <!-- 3. 출력 -->
+  <section class="card" id="card-output">
+    <h2><span class="num">3</span>출력</h2>
+    <div class="block">
+      <span class="label">서식</span>
+      <div class="segmented small" id="preset-radios" role="radiogroup"></div>
+      <p class="hint" id="preset-summary"></p>
+      <p class="hint warn-text hidden" id="preset-hint"></p>
+      <div id="custom-panel" class="custom hidden">
+        <div class="grid2">
+          <label>출발 서식<select id="cu-base"></select></label>
+          <label>글꼴<span class="combo" data-key="font"></span></label>
+          <label>제목 크기<span class="combo" data-key="title_size"></span></label>
+          <label>본문 크기<span class="combo" data-key="size"></span></label>
+          <label>줄 간격(배)<span class="combo" data-key="line_spacing"></span></label>
+          <label>본문 장평<span class="combo" data-key="body_scale"></span></label>
+          <label>표 글자 크기(최대)<span class="combo" data-key="table_size"></span></label>
+          <label>표 장평<span class="combo" data-key="table_scale"></span></label>
+        </div>
+        <span class="label small">여백(cm)</span>
+        <div class="grid4">
+          <label>위<input id="cu-margin_top" type="number" step="0.1" min="0"></label>
+          <label>아래<input id="cu-margin_bottom" type="number" step="0.1" min="0"></label>
+          <label>왼쪽<input id="cu-margin_left" type="number" step="0.1" min="0"></label>
+          <label>오른쪽<input id="cu-margin_right" type="number" step="0.1" min="0"></label>
+        </div>
+      </div>
+    </div>
+
+    <label class="block">문서 제목
+      <input type="text" id="doc-title" placeholder="비우면 첫 번째 입력의 제목">
+    </label>
+
+    <div class="block">
+      <span class="label">날짜</span>
+      <div class="segmented small" role="radiogroup">
+        <label><input type="radio" name="date" value="" checked><span>넣지 않음</span></label>
+        <label><input type="radio" name="date" value="today"><span>오늘</span></label>
+        <label><input type="radio" name="date" value="pick"><span>직접 지정</span></label>
+      </div>
+      <input type="date" id="date-pick" class="hidden">
+    </div>
+
+    <div class="block">
+      <span class="label">파일 형식</span>
+      <label class="check"><input type="checkbox" checked disabled> Word(.docx)</label>
+      <label class="check"><input type="checkbox" id="out-pdf"> PDF</label>
+      <label class="check"><input type="checkbox" id="out-md"> Markdown(.md)</label>
+      <label class="check"><input type="checkbox" id="out-report" checked> 변경 내역(.md) 저장</label>
+    </div>
+
+    <p class="hint folder">저장 폴더: <code id="out-dir">…</code>
+      <button class="link" id="open-folder">폴더 열기</button></p>
+
+    <button class="btn primary big" id="convert">변환하기</button>
+
+    <div id="progress" class="progress hidden">
+      <div class="spinner"></div>
+      <ol id="progress-log"></ol>
+    </div>
+
+    <div id="result" class="result hidden"></div>
+  </section>
+
+  <!-- 최근 결과 -->
+  <section class="card" id="card-history">
+    <h2>최근 결과 <button class="link" id="history-refresh">새로 고침</button></h2>
+    <ul class="history" id="history"></ul>
+    <p class="empty" id="history-empty">아직 만든 문서가 없습니다.</p>
+  </section>
+</main>
+
+<!-- 사용자 등록 (2026-09-30: 팀 공유 — 토큰은 사람마다, 이 PC에만 암호화해 보관) -->
+<dialog id="account-dlg" class="dlg">
+  <form method="dialog" id="account-form" autocomplete="off">
+    <h2>사용자 등록</h2>
+    <p class="hint">토큰과 API 키는 이 PC의 내 Windows 계정 폴더에만 보관합니다 — 보호 방식: <b id="acc-protection"></b>.
+      저장소 폴더·git에는 들어가지 않고, 이 화면에도 끝 4자리만 보입니다. 토큰 주인은 저장할 때 Confluence에 물어
+      확인해 화면 위에 표시합니다.</p>
+    <label>사용자 이름 <input id="acc-name" required placeholder="예) 홍길동"></label>
+    <fieldset>
+      <legend>Confluence</legend>
+      <label>REST 주소 <input id="acc-cf-url" placeholder="예) http://api.confluence.회사/rest/api/"></label>
+      <label>개인 액세스 토큰(PAT) <input id="acc-cf-token" type="password" placeholder="Confluence 프로필 → 개인 액세스 토큰에서 발급"></label>
+      <label>로그인 이메일 <span class="hint">(Confluence Cloud만 — 사내 Server/DC는 비워 둠)</span>
+        <input id="acc-cf-user" placeholder=""></label>
+      <div class="hint" id="acc-cf-state"></div>
+    </fieldset>
+    <fieldset>
+      <legend>온프렘 LLM <span class="hint">(쓰지 않으면 비워 둠)</span></legend>
+      <label>API 주소 <input id="acc-llm-url" placeholder="예) http://서버:8000/v1"></label>
+      <label>모델명 <input id="acc-llm-model" placeholder="예) thinkingcap"></label>
+      <label>API 키 <span class="hint">(필요할 때만)</span> <input id="acc-llm-key" type="password"></label>
+      <label class="check hidden" id="acc-llm-clear-row"><input type="checkbox" id="acc-llm-clear"> 저장된 API 키 지우기</label>
+    </fieldset>
+    <div class="err" id="acc-error"></div>
+    <div class="row dlg-actions">
+      <button class="btn primary" id="acc-save" type="button">저장하고 토큰 확인</button>
+      <button class="btn" id="acc-verify" type="button">토큰 주인 다시 확인</button>
+      <button class="btn danger" id="acc-delete" type="button">등록 삭제</button>
+      <button class="btn" id="acc-close" type="button">닫기</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast hidden"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

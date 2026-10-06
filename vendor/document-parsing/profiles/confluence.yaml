@@ -1,0 +1,79 @@
+# Confluence·내용 많은 문서용 서식 — default를 물려받고 아래 값만 바꾼다.
+#
+# Confluence URL을 변환하면 -p 없이도 이 프로파일이 자동으로 쓰인다.
+# 마크다운이라도 글이 많은 문서면 -p confluence 로 고를 수 있다.
+#
+# 2026-09-29 사용자 규칙:
+#   1) 원문에 이미 쓴 글머리 기호(1. 1) □ - · ① ※ 등)는 바꾸지 않는다 — default에서 물려받음
+#   2) Confluence 문장은 이미 정리돼 있으니 문장을 따로 다듬지 않는다 — text.polish: none
+#   3) 내용 많은 문서는 제목 16pt, 본문 12pt, 표 11~9pt
+# 2026-09-29 사용자 "Confluence 변환" 서식(두 번째 확정):
+#   여백 위·아래·좌·우 모두 2cm, 맑은 고딕, 제목 18pt 가운데·밑줄,
+#   본문 12pt·장평 95%·줄간격 1.0배·단락 앞뒤 간격 0pt,
+#   표 10pt·장평 80% 고정(글씨가 많아도 9pt로 줄이지 않음)
+
+extends: default
+name: confluence
+description: Confluence·내용 많은 문서 (원문 말머리·문장 유지)
+label: Confluence 변환
+preset_order: 2
+
+page:
+  margin:
+    top: 20mm
+    bottom: 20mm
+    left: 20mm
+    right: 20mm
+
+fonts:
+  body:                      # 다른 서식(제목·표·날짜)은 글꼴을 body에서 물려받는다
+    eastAsia: 맑은 고딕
+    ascii: 맑은 고딕
+    size: 12pt
+    line_spacing: 100%
+    char_scale: 95%          # 장평 — 말머리 항목·일반 문단
+    space_before: 0pt
+    space_after: 0pt
+  title:
+    size: 18pt
+    align: center
+    underline: true
+    char_scale: 100%         # 본문 장평을 물려받지 않게
+  date:
+    size: 12pt
+    char_scale: 100%
+  table:
+    size: 10pt
+  caption:
+    size: 12pt
+    char_scale: 100%
+  callout:                   # Confluence 정보·경고 패널 — 본문과 같은 크기
+    size: 12pt
+
+# 단락 앞뒤 간격 0pt — 1.·□·- 모든 단계에 똑같이(단계가 바뀌는 자리 간격도 0)
+numbering_all:
+  space_before: 0pt
+  space_after: 0pt
+  space_after_level_change: 0pt
+
+tables:
+  font_ladder: [10pt]        # 10pt 고정 — 글씨가 많아도 더 줄이지 않는다(사용자)
+  char_scale_ladder: [80%]   # 장평 80% 고정
+
+text:
+  polish: none               # 문장 다듬기(개조식·명사 종결·LLM) 안 함. --polish를 주면 그쪽이 이긴다
+  gaechosik: false
+  noun_ending: false
+  split_long_sentences: false
+  merge_short_items: false   # "및" 병합도 문장을 바꾸는 일이라 끈다
+  auto_markers: false        # 말머리 없는 제목·문단에 □/- 를 새로 만들지 않음(이미 구분해 쓴 문서)
+  level_bold: false          # 1.·□ 단계 문장 전체 굵게 안 함 — 원문에서 굵던 글씨와 제목만 굵게
+
+choices:
+  font: [맑은 고딕, 바탕체]
+  line_spacing: ["1.0", "1.15", "1.25", "1.45"]
+  title_size: [18pt, 16pt, 20pt]
+  size: [12pt, 11pt, 13pt]
+  table_size: [10pt, 11pt, 9pt]
+  body_scale: ["95%", "100%", "90%"]
+  table_scale: ["80%", "90%", "95%", "100%"]

@@ -48,16 +48,20 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# ── 1) 사내 CA 인증서 등록 + git(pip가 requirements.txt의 doc2report를
-#       git+https 로 받으려면 필요) ──
+# ── 1) 사내 CA 인증서 등록 ──
 # certs/ 에 아래 중 하나(또는 둘 다)를 둘 수 있다:
 #   (a) 개별 사내 CA:  certs/corp-root-ca.crt  → update-ca-certificates 로 등록
 #   (b) 전체 CA 번들:  certs/ca-bundle.crt     → 시스템 번들을 통째로 교체
 # 둘 다 없으면 컨테이너 기본 CA 로 빌드한다.
+#
+# (git은 더 안 받는다 - doc2report를 pip git+https로 받다가 사내망에서
+# git clone이 막혀 빌드가 실패했던 문제가 있어서, 그 소스를 vendor/document-parsing/에
+# 통째로 복사해 두고 보통의 pip 패키지(python-docx 등, requirements.txt)로만
+# 설치한다. vendor/document-parsing/README.md 참고.)
 COPY certs/ /tmp/corp-certs/
 RUN http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY" no_proxy="$NO_PROXY" \
     apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates git \
+    && apt-get install -y --no-install-recommends ca-certificates \
     && for f in /tmp/corp-certs/*.crt; do \
          [ -e "$f" ] || continue; \
          case "$f" in */ca-bundle.crt) continue ;; esac; \
