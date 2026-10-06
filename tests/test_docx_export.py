@@ -1,11 +1,11 @@
+import io
 import os
-import sys
-import types
 import unittest
-from pathlib import Path
 from unittest import mock
 
-from confluence_agenda.web import confluence_credentials
+from docx import Document as DocxDocument
+
+from confluence_agenda.web import confluence_credentials, docx_export
 from confluence_agenda.web.docx_export import (
     DocxExportUnavailable,
     convert_confluence_url_to_docx,
@@ -14,55 +14,54 @@ from confluence_agenda.web.docx_export import (
 )
 
 
-def _fake_doc2report_modules(convert_fn=None):
-    """실제 doc2report 패키지를 설치하지 않고도 docx_export.py의 지연 import가
-    받아들일 수 있는 가짜 모듈들을 만든다(sys.modules 스텁)."""
-    pkg = types.ModuleType("doc2report")
-    pipeline_mod = types.ModuleType("doc2report.pipeline")
-    pipeline_mod.convert = convert_fn or (lambda *a, **k: None)
-    return {"doc2report": pkg, "doc2report.pipeline": pipeline_mod}
+def _fake_response(*, status_code=200, json_data=None, text=""):
+    resp = mock.Mock()
+    resp.status_code = status_code
+    resp.json.return_value = json_data or {}
+    resp.text = text
+    return resp
 
 
-def _simulate_doc2report_not_installed():
-    """doc2report는 이제 vendor/document-parsing/에 소스로 들어있어 디스크에서
-    지울 수 없다(그 디렉터리 자체가 사라지지 않는 한 항상 import 가능) - 그래서
-    sys.modules에 None을 넣어 "이 이름은 import할 수 없다"고 못박는, CPython
-    import 시스템이 공식적으로 지원하는 방법으로 설치 안 된 상태를 흉내낸다."""
-    return {"doc2report": None, "doc2report.pipeline": None}
+def _page_response(storage_html: str, *, title: str = "테스트 문서"):
+    return _fake_response(
+        json_data={"title": title, "body": {"storage": {"value": storage_html}}}
+    )
+
+
+def _docx_paragraph_texts(data: bytes):
+    document = DocxDocument(io.BytesIO(data))
+    return [p.text for p in document.paragraphs]
 
 
 class IsFeatureAvailableTest(unittest.TestCase):
-    def test_false_when_doc2report_not_installed(self):
-        with mock.patch.dict(sys.modules, _simulate_doc2report_not_installed()), mock.patch.dict(
-            os.environ, {"CONFLUENCE_URL": "https://wiki.example.com", "CONFLUENCE_API_TOKEN": "t"}, clear=True
-        ):
-            self.assertFalse(is_feature_available())
-
     def test_false_when_confluence_url_not_set(self):
-        with mock.patch.dict(sys.modules, _fake_doc2report_modules()), mock.patch.dict(
-            os.environ, {"CONFLUENCE_API_TOKEN": "t"}, clear=True
-        ):
+        with mock.patch.dict(os.environ, {"CONFLUENCE_API_TOKEN": "t"}, clear=True):
             self.assertFalse(is_feature_available())
 
     def test_true_when_url_and_global_token_both_set(self):
         env = {"CONFLUENCE_URL": "https://wiki.example.com", "CONFLUENCE_API_TOKEN": "t"}
-        with mock.patch.dict(sys.modules, _fake_doc2report_modules()), mock.patch.dict(
-            os.environ, env, clear=True
-        ):
+        with mock.patch.dict(os.environ, env, clear=True):
             self.assertTrue(is_feature_available())
 
     def test_true_when_no_global_token_but_per_user_storage_available(self):
         env = {"CONFLUENCE_URL": "https://wiki.example.com"}
-        with mock.patch.dict(sys.modules, _fake_doc2report_modules()), mock.patch.dict(
-            os.environ, env, clear=True
-        ), mock.patch.object(confluence_credentials, "is_configured", return_value=True):
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(
+            confluence_credentials, "is_configured", return_value=True
+        ):
             self.assertTrue(is_feature_available())
 
     def test_false_when_no_global_token_and_no_per_user_storage(self):
         env = {"CONFLUENCE_URL": "https://wiki.example.com"}
-        with mock.patch.dict(sys.modules, _fake_doc2report_modules()), mock.patch.dict(
-            os.environ, env, clear=True
-        ), mock.patch.object(confluence_credentials, "is_configured", return_value=False):
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(
+            confluence_credentials, "is_configured", return_value=False
+        ):
+            self.assertFalse(is_feature_available())
+
+    def test_false_when_rendering_dependencies_missing(self):
+        env = {"CONFLUENCE_URL": "https://wiki.example.com", "CONFLUENCE_API_TOKEN": "t"}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(
+            docx_export, "DocxDocument", None
+        ), mock.patch.object(docx_export, "etree", None):
             self.assertFalse(is_feature_available())
 
 
@@ -87,95 +86,202 @@ class ResolveTokenTest(unittest.TestCase):
             self.assertIsNone(resolve_token("dh.kwon"))
 
 
-class ConvertConfluenceUrlToDocxTest(unittest.TestCase):
-    def test_raises_unavailable_when_doc2report_not_installed(self):
-        with mock.patch.dict(sys.modules, _simulate_doc2report_not_installed()):
-            with self.assertRaisesRegex(DocxExportUnavailable, "설치되지 않았습니다"):
+class ConvertConfluenceUrlToDocxGuardsTest(unittest.TestCase):
+    def test_raises_unavailable_when_rendering_dependencies_missing(self):
+        env = {"CONFLUENCE_URL": "https://wiki.example.com"}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(
+            docx_export, "DocxDocument", None
+        ), mock.patch.object(docx_export, "etree", None):
+            with self.assertRaisesRegex(DocxExportUnavailable, "python-docx/lxml"):
                 convert_confluence_url_to_docx("https://wiki.example.com/pages/123456", token="t")
 
     def test_raises_unavailable_when_url_not_configured(self):
-        with mock.patch.dict(sys.modules, _fake_doc2report_modules()), mock.patch.dict(
-            os.environ, {}, clear=True
-        ):
+        with mock.patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(DocxExportUnavailable, "CONFLUENCE_URL"):
                 convert_confluence_url_to_docx("https://wiki.example.com/pages/123456", token="t")
 
     def test_raises_unavailable_when_no_token_available(self):
         env = {"CONFLUENCE_URL": "https://wiki.example.com"}
-        with mock.patch.dict(sys.modules, _fake_doc2report_modules()), mock.patch.dict(
-            os.environ, env, clear=True
-        ):
+        with mock.patch.dict(os.environ, env, clear=True):
             with self.assertRaisesRegex(DocxExportUnavailable, "PAT"):
                 convert_confluence_url_to_docx("https://wiki.example.com/pages/123456")
 
-    def test_returns_bytes_and_safe_filename_on_success(self):
-        class _FakeDocument:
-            title = "예산안 승인 / 2026"
-
-        class _FakeResult:
-            document = _FakeDocument()
-
-        def fake_convert(source, output=None, **kwargs):
-            Path(output).write_bytes(b"PK\x03\x04-fake-docx-bytes")
-            return _FakeResult()
-
+    def test_raises_when_page_id_cannot_be_found_in_url(self):
         env = {"CONFLUENCE_URL": "https://wiki.example.com"}
-        with mock.patch.dict(sys.modules, _fake_doc2report_modules(fake_convert)), mock.patch.dict(
-            os.environ, env, clear=True
-        ):
-            data, filename = convert_confluence_url_to_docx(
-                "https://wiki.example.com/pages/123456", token="personal-pat"
-            )
-            # 변환이 끝나면 요청 전 상태(토큰 없음)로 깨끗이 되돌아가 있어야 한다.
-            self.assertNotIn("CONFLUENCE_API_TOKEN", os.environ)
+        with mock.patch.dict(os.environ, env, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "페이지 ID"):
+                convert_confluence_url_to_docx("https://wiki.example.com/not-a-page-url", token="t")
 
-        self.assertEqual(data, b"PK\x03\x04-fake-docx-bytes")
-        # 파일명으로 쓸 수 없는 문자(/)는 빠지고, 확장자는 .docx로 붙는다.
+
+class ConvertConfluenceUrlToDocxHttpTest(unittest.TestCase):
+    def setUp(self):
+        self._env_patch = mock.patch.dict(
+            os.environ, {"CONFLUENCE_URL": "https://wiki.example.com"}, clear=True
+        )
+        self._env_patch.start()
+        self.addCleanup(self._env_patch.stop)
+
+    def test_401_raises_auth_error(self):
+        with mock.patch("requests.get", return_value=_fake_response(status_code=401)):
+            with self.assertRaisesRegex(RuntimeError, "인증 실패"):
+                convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+    def test_403_raises_permission_error(self):
+        with mock.patch("requests.get", return_value=_fake_response(status_code=403)):
+            with self.assertRaisesRegex(RuntimeError, "접근 권한"):
+                convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+    def test_404_raises_not_found_error(self):
+        with mock.patch("requests.get", return_value=_fake_response(status_code=404)):
+            with self.assertRaisesRegex(RuntimeError, "찾을 수 없습니다"):
+                convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+    def test_missing_storage_body_raises(self):
+        resp = _fake_response(json_data={"title": "제목", "body": {}})
+        with mock.patch("requests.get", return_value=resp):
+            with self.assertRaisesRegex(RuntimeError, "storage 본문"):
+                convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+    def test_sends_bearer_auth_header_when_no_username_configured(self):
+        resp = _page_response("<p>본문</p>")
+        with mock.patch("requests.get", return_value=resp) as fake_get:
+            convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="my-pat")
+
+        headers = fake_get.call_args.kwargs["headers"]
+        self.assertEqual(headers["Authorization"], "Bearer my-pat")
+
+    def test_sends_basic_auth_header_when_username_configured(self):
+        with mock.patch.dict(os.environ, {"CONFLUENCE_USERNAME": "someone@example.com"}):
+            resp = _page_response("<p>본문</p>")
+            with mock.patch("requests.get", return_value=resp) as fake_get:
+                convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="my-pat")
+
+        headers = fake_get.call_args.kwargs["headers"]
+        self.assertTrue(headers["Authorization"].startswith("Basic "))
+
+    def test_filename_strips_unsafe_characters_and_adds_docx_extension(self):
+        resp = _page_response("<p>본문</p>", title="예산안 승인 / 2026")
+        with mock.patch("requests.get", return_value=resp):
+            _, filename = convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
         self.assertEqual(filename, "예산안 승인  2026.docx")
 
-    def test_falls_back_to_generic_filename_when_title_missing(self):
-        class _FakeDocument:
-            title = None
-
-        class _FakeResult:
-            document = _FakeDocument()
-
-        def fake_convert(source, output=None, **kwargs):
-            Path(output).write_bytes(b"data")
-            return _FakeResult()
-
-        env = {"CONFLUENCE_URL": "https://wiki.example.com"}
-        with mock.patch.dict(sys.modules, _fake_doc2report_modules(fake_convert)), mock.patch.dict(
-            os.environ, env, clear=True
-        ):
-            _, filename = convert_confluence_url_to_docx(
-                "https://wiki.example.com/pages/123456", token="t"
+    def test_accepts_page_id_query_string_url_form(self):
+        resp = _page_response("<p>본문</p>")
+        with mock.patch("requests.get", return_value=resp) as fake_get:
+            convert_confluence_url_to_docx(
+                "https://wiki.example.com/pages/viewpage.action?pageId=99887", token="t"
             )
 
-        self.assertEqual(filename, "report.docx")
+        called_url = fake_get.call_args.args[0]
+        self.assertIn("99887", called_url)
 
-    def test_uses_explicit_token_over_global_env_token_during_call(self):
-        seen_tokens = []
 
-        def fake_convert(source, output=None, **kwargs):
-            seen_tokens.append(os.environ.get("CONFLUENCE_API_TOKEN"))
-            Path(output).write_bytes(b"data")
+class RenderedDocxContentTest(unittest.TestCase):
+    """실제로 storage XHTML을 넣었을 때 .docx 본문에 올바른 내용이 들어가는지 확인한다."""
 
-            class _R:
-                class document:
-                    title = "t"
+    def setUp(self):
+        self._env_patch = mock.patch.dict(
+            os.environ, {"CONFLUENCE_URL": "https://wiki.example.com"}, clear=True
+        )
+        self._env_patch.start()
+        self.addCleanup(self._env_patch.stop)
 
-            return _R()
+    def _convert(self, storage_html: str, *, title: str = "테스트 문서") -> bytes:
+        resp = _page_response(storage_html, title=title)
+        with mock.patch("requests.get", return_value=resp):
+            data, _ = convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+        return data
 
-        env = {"CONFLUENCE_URL": "https://wiki.example.com", "CONFLUENCE_API_TOKEN": "global-token"}
-        with mock.patch.dict(sys.modules, _fake_doc2report_modules(fake_convert)), mock.patch.dict(
-            os.environ, env, clear=True
-        ):
-            convert_confluence_url_to_docx("https://wiki.example.com/pages/123456", token="personal-pat")
-            # 호출 동안에는 전달받은 토큰으로 바뀌어 있었고, 끝난 뒤에는 원래 전역 토큰으로 복원된다.
-            self.assertEqual(os.environ["CONFLUENCE_API_TOKEN"], "global-token")
+    def test_title_becomes_first_heading(self):
+        data = self._convert("<p>본문</p>", title="회의록")
+        self.assertIn("회의록", _docx_paragraph_texts(data))
 
-        self.assertEqual(seen_tokens, ["personal-pat"])
+    def test_headings_and_paragraph_are_preserved(self):
+        data = self._convert("<h2>소제목</h2><p>본문 내용입니다.</p>")
+        texts = _docx_paragraph_texts(data)
+        self.assertIn("소제목", texts)
+        self.assertIn("본문 내용입니다.", texts)
+
+    def test_bold_and_italic_runs_are_preserved(self):
+        data = self._convert("<p>일반 <strong>굵게</strong>와 <em>기울임</em> 텍스트</p>")
+        document = DocxDocument(io.BytesIO(data))
+        paragraph = document.paragraphs[-1]
+        bold_runs = [r for r in paragraph.runs if r.text == "굵게"]
+        italic_runs = [r for r in paragraph.runs if r.text == "기울임"]
+        self.assertTrue(bold_runs and bold_runs[0].bold)
+        self.assertTrue(italic_runs and italic_runs[0].italic)
+
+    def test_bullet_list_items_become_separate_paragraphs(self):
+        data = self._convert("<ul><li>첫째</li><li>둘째</li></ul>")
+        texts = _docx_paragraph_texts(data)
+        self.assertIn("첫째", texts)
+        self.assertIn("둘째", texts)
+
+    def test_table_cells_are_preserved(self):
+        storage = (
+            "<table><tbody>"
+            "<tr><th>이름</th><th>역할</th></tr>"
+            "<tr><td>권동혁</td><td>스탭팀장</td></tr>"
+            "</tbody></table>"
+        )
+        data = self._convert(storage)
+        document = DocxDocument(io.BytesIO(data))
+        self.assertEqual(len(document.tables), 1)
+        table = document.tables[0]
+        self.assertEqual(table.cell(0, 0).text, "이름")
+        self.assertEqual(table.cell(1, 0).text, "권동혁")
+        self.assertEqual(table.cell(1, 1).text, "스탭팀장")
+
+    def test_colspan_merges_cells(self):
+        storage = (
+            '<table><tbody><tr><td colspan="2">합쳐진 칸</td></tr>'
+            "<tr><td>a</td><td>b</td></tr></tbody></table>"
+        )
+        data = self._convert(storage)
+        document = DocxDocument(io.BytesIO(data))
+        table = document.tables[0]
+        self.assertEqual(table.cell(0, 0).text, "합쳐진 칸")
+        # 병합된 칸이라 (0,0)과 (0,1)이 같은 셀을 가리켜야 한다.
+        self.assertEqual(table.cell(0, 0)._tc, table.cell(0, 1)._tc)
+
+    def test_macro_rich_text_body_is_unwrapped(self):
+        storage = (
+            '<ac:structured-macro ac:name="info" xmlns:ac="http://www.atlassian.com/schema/confluence/4/ac/">'
+            "<ac:rich-text-body><p>안내 문구입니다.</p></ac:rich-text-body>"
+            "</ac:structured-macro>"
+        )
+        data = self._convert(storage)
+        self.assertIn("안내 문구입니다.", _docx_paragraph_texts(data))
+
+    def test_unsupported_macro_without_rich_text_body_becomes_placeholder_note(self):
+        storage = (
+            '<ac:structured-macro ac:name="children" '
+            'xmlns:ac="http://www.atlassian.com/schema/confluence/4/ac/"/>'
+        )
+        data = self._convert(storage)
+        texts = _docx_paragraph_texts(data)
+        self.assertTrue(any("children" in t and "지원하지 않습니다" in t for t in texts))
+
+    def test_image_becomes_placeholder_note(self):
+        storage = (
+            '<ac:image xmlns:ac="http://www.atlassian.com/schema/confluence/4/ac/" '
+            'xmlns:ri="http://www.atlassian.com/schema/confluence/4/ri/">'
+            '<ri:attachment ri:filename="diagram.png"/>'
+            "</ac:image>"
+        )
+        data = self._convert(storage)
+        texts = _docx_paragraph_texts(data)
+        self.assertTrue(any("diagram.png" in t for t in texts))
+
+    def test_layout_wrapper_is_flattened(self):
+        storage = (
+            '<ac:layout xmlns:ac="http://www.atlassian.com/schema/confluence/4/ac/">'
+            '<ac:layout-section ac:type="single"><ac:layout-cell><p>레이아웃 안 내용</p>'
+            "</ac:layout-cell></ac:layout-section></ac:layout>"
+        )
+        data = self._convert(storage)
+        self.assertIn("레이아웃 안 내용", _docx_paragraph_texts(data))
 
 
 if __name__ == "__main__":

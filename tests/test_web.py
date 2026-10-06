@@ -322,7 +322,7 @@ class ConfluenceDocxAndPatTest(unittest.TestCase):
         env = {"CONFLUENCE_API_TOKEN": "global-token"}
         with mock.patch.dict("os.environ", env, clear=True), mock.patch(
             "confluence_agenda.web.app.convert_confluence_url_to_docx",
-            side_effect=DocxExportUnavailable("doc2report가 설치되지 않았습니다."),
+            side_effect=DocxExportUnavailable("python-docx/lxml이 설치되지 않았습니다."),
         ):
             resp = self.client.post(
                 "/confluence-to-docx",

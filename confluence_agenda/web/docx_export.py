@@ -1,75 +1,70 @@
 """Confluence 페이지를 조회해 Word(.docx)로 변환하는 기능.
 
-wcoffee77/document-parsing(doc2report)의 코드를 그대로 가져와 쓴다. 그
-저장소의 pipeline.convert()가 "URL -> REST API로 storage XHTML 조회 -> 레이아웃
-계산 -> .docx 저장"을 전부 처리하므로, 여기서는 얇게 감싸서 Flask 라우트에서
-쓰기 좋은 형태(바이트 + 파일명)로 바꾸는 역할만 한다. 계정 등록 화면이나 토큰
-암호화 저장 같은 그쪽 전용 UI(web/server.py, account.py)는 가져오지 않았다 -
-대신 이 앱 자신의 로그인(auth.py)에 묶어 confluence_credentials.py가 사용자별
-PAT을 저장한다.
+wcoffee77/document-parsing(doc2report)을 참고했지만, 그 코드를 가져오지는
+않았다 - REST API 호출과 storage XHTML 처리 방식만 참고해서 이 파일에 직접
+새로 구현했다. doc2report는 사내 보고서 규격에 맞춘 표 분할·쪽 배치 계산·
+한국어 문구 다듬기까지 하는 꽤 큰 파이프라인인데, 여기서는 그 전체를 가져올
+필요가 없어서 "본문을 읽을 수 있는 Word 문서로" 수준으로 범위를 줄였다.
 
-doc2report는 pip 패키지로 받지 않는다 - requirements.txt에 `doc2report @
-git+https://...`로 넣었다가, 사내망에서 Docker 빌드 중 `git clone` 자체가
-막혀서(2026-10 보고) 빌드가 실패했다. 그래서 그 저장소의 소스를 통째로
-vendor/document-parsing/에 복사해 두고(특정 커밋 고정, vendor/document-parsing/
-README.md 참고) 이 파일이 import 시점에 그 경로를 sys.path에 추가한다 - 빌드
-중 깃을 쓸 일이 전혀 없고, python-docx/lxml/pydantic 등 doc2report 자신의
-의존성만 requirements.txt에서 일반 PyPI 패키지로 받는다.
+지원하는 것: 제목(h1~h6), 문단(굵게/기울임/밑줄/줄바꿈), 목록(ul/ol, 평평하게),
+표(칸 병합 중 colspan만 반영), 패널/펼치기류 매크로(rich-text-body가 있으면
+그 내용만 펼침). 지원하지 않는 것(건너뛰고 자리만 표시): 이미지/첨부 다운로드,
+행 병합(rowspan), 다른 페이지를 끌어오는 매크로(include/하위 페이지 등).
 
 CONFLUENCE_URL이 없으면 이 기능 자체가 꺼진다(is_feature_available() False).
 토큰(PAT)은 두 가지 경로를 지원한다:
   1. 사용자별 등록 (confluence_credentials.py, 로그인 DB에 암호화 저장) - 우선.
   2. 전역 CONFLUENCE_API_TOKEN 환경변수 - 사용자별 등록이 없을 때 fallback
      (로그인 기능을 안 쓰는 배포, 또는 CLI 전용 사용 등).
-doc2report 자신의 의존성이 설치되지 않은 환경에서도 나머지 기능은 그대로
-쓸 수 있다(아래 _doc2report_installed()가 import 실패를 흡수함).
 """
 
 from __future__ import annotations
 
+import base64
 import os
 import re
-import sys
-import tempfile
-import threading
-from pathlib import Path
-from typing import Optional, Tuple
+from io import BytesIO
+from typing import List, Optional, Tuple
+
+import requests
 
 from . import confluence_credentials
 
-# vendor/document-parsing/src/doc2report - wcoffee77/document-parsing의 소스를
-# 그대로 복사해 둔 것(git 의존성 대신). 이 파일 기준 두 단계 위가 저장소 루트다
-# (confluence_agenda/web/docx_export.py -> confluence_agenda/web -> confluence_agenda -> 루트).
-_VENDOR_SRC = str(Path(__file__).resolve().parents[2] / "vendor" / "document-parsing" / "src")
-if _VENDOR_SRC not in sys.path:
-    sys.path.insert(0, _VENDOR_SRC)
+try:
+    from docx import Document as DocxDocument
+    from lxml import etree
+except ImportError:  # python-docx/lxml 미설치 - 이 기능만 비활성화된다.
+    DocxDocument = None
+    etree = None
+
+# Confluence storage format이 쓰는 매크로/리소스 네임스페이스. REST API가 주는
+# body.storage.value는 이 접두어들이 선언 없이 그냥 쓰인 "조각"이라, 파싱 전에
+# 이 둘을 선언하는 가상의 <root>로 감싸야 한다(_parse_storage 참고).
+_AC_NS = "http://www.atlassian.com/schema/confluence/4/ac/"
+_RI_NS = "http://www.atlassian.com/schema/confluence/4/ri/"
 
 
 class DocxExportUnavailable(RuntimeError):
-    """doc2report가 설치되지 않았거나, Confluence 연동에 필요한 설정(URL/토큰)이 없을 때."""
-
-
-def _doc2report_installed() -> bool:
-    try:
-        import doc2report  # noqa: F401
-    except ImportError:
-        return False
-    return True
+    """Confluence 연동에 필요한 설정(URL/토큰)이 없을 때."""
 
 
 def is_url_configured() -> bool:
     return bool(os.environ.get("CONFLUENCE_URL", "").strip())
 
 
+def _rendering_dependencies_installed() -> bool:
+    return DocxDocument is not None and etree is not None
+
+
 def is_feature_available() -> bool:
     """화면에 "컨플루언스 → Word" 카드를 보여줄지.
 
-    URL은 전역 설정이 필수고, 토큰은 전역(CONFLUENCE_API_TOKEN) 또는 사용자별
-    DB 등록(confluence_credentials)이 가능한 상태면 된다 - 아직 아무도 등록
-    전이어도, 등록할 수 있는 상태라면 카드는 보여주고 등록 폼을 그 안에 띄운다.
-    실제로 쓸 토큰이 없으면 변환 시점에 안내한다(resolve_token 참고).
+    python-docx/lxml이 설치돼 있어야 하고, URL은 전역 설정이 필수다. 토큰은
+    전역(CONFLUENCE_API_TOKEN) 또는 사용자별 DB 등록(confluence_credentials)이
+    가능한 상태면 된다 - 아직 아무도 등록 전이어도, 등록할 수 있는 상태라면
+    카드는 보여주고 등록 폼을 그 안에 띄운다.
     """
-    if not _doc2report_installed() or not is_url_configured():
+    if not _rendering_dependencies_installed() or not is_url_configured():
         return False
     if os.environ.get("CONFLUENCE_API_TOKEN", "").strip():
         return True
@@ -87,21 +82,267 @@ def resolve_token(user_id: Optional[str]) -> Optional[str]:
     return env_token or None
 
 
+# ── Confluence REST API 호출 ────────────────────────────────────────────
+
+_PAGE_ID_PATTERNS = (
+    re.compile(r"/pages/(\d+)(?:/|$)"),
+    re.compile(r"[?&]pageId=(\d+)"),
+)
+
+
+def _page_id_from_url(url: str) -> Optional[str]:
+    for pattern in _PAGE_ID_PATTERNS:
+        match = pattern.search(url)
+        if match:
+            return match.group(1)
+    if url.isdigit():
+        return url
+    return None
+
+
+_REST_API_SUFFIX = re.compile(r"/rest/api/?$", re.IGNORECASE)
+
+
+def _normalize_base_url(url: str) -> str:
+    """끝의 슬래시와, 있다면 '/rest/api'까지 뗀다 - 위키 주소와 REST 게이트웨이
+    주소 둘 중 뭘 CONFLUENCE_URL에 넣어도 되게(코드가 항상 그 뒤에 /rest/api/...를 붙인다)."""
+    return _REST_API_SUFFIX.sub("", url.rstrip("/"))
+
+
+def _auth_headers(token: str) -> dict:
+    username = os.environ.get("CONFLUENCE_USERNAME", "").strip()
+    if username:
+        basic = base64.b64encode(f"{username}:{token}".encode()).decode()
+        return {"Authorization": f"Basic {basic}"}  # Cloud: 이메일 + API 토큰
+    return {"Authorization": f"Bearer {token}"}  # Server/Data Center: PAT
+
+
+_CA_BUNDLE_ENV_VARS = ("CONFLUENCE_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE")
+
+
+def _ssl_verify():
+    for key in _CA_BUNDLE_ENV_VARS:
+        path = os.environ.get(key, "").strip()
+        if path:
+            return path
+    return True
+
+
+def _fetch_page(base_url: str, page_id: str, token: str) -> dict:
+    try:
+        resp = requests.get(
+            f"{base_url}/rest/api/content/{page_id}",
+            params={"expand": "body.storage"},
+            headers=_auth_headers(token),
+            timeout=30,
+            verify=_ssl_verify(),
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(
+            f"Confluence 서버 연결 실패: {exc}\n"
+            "사내망 SSL 인증서 문제일 수 있습니다 - CONFLUENCE_CA_BUNDLE 환경변수로 "
+            "사내 루트 인증서(.crt/.pem) 경로를 지정해 보세요."
+        ) from exc
+
+    if resp.status_code == 401:
+        raise RuntimeError("Confluence 인증 실패(401). 토큰(PAT)을 확인하세요.")
+    if resp.status_code == 403:
+        raise RuntimeError(f"페이지 {page_id}에 접근 권한이 없습니다(403).")
+    if resp.status_code == 404:
+        raise RuntimeError(f"페이지 {page_id}를 찾을 수 없습니다(404). URL을 확인하세요.")
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Confluence API 오류 (HTTP {resp.status_code}): {resp.text[:300]}")
+    return resp.json()
+
+
+# ── storage XHTML 파싱 ──────────────────────────────────────────────────
+
+
+def _parse_storage(storage_html: str) -> etree._Element:
+    wrapped = f'<root xmlns:ac="{_AC_NS}" xmlns:ri="{_RI_NS}">{storage_html}</root>'
+    parser = etree.XMLParser(recover=True, resolve_entities=False)
+    root = etree.fromstring(wrapped.encode("utf-8"), parser=parser)
+    if root is None:
+        raise RuntimeError("Confluence storage XHTML을 해석하지 못했습니다.")
+    return root
+
+
+def _local(tag: str) -> str:
+    return etree.QName(tag).localname if isinstance(tag, str) else ""
+
+
+def _is_ac(element, name: str) -> bool:
+    return element.tag == f"{{{_AC_NS}}}{name}"
+
+
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _clean_text(text: Optional[str]) -> str:
+    return _WHITESPACE_RE.sub(" ", text) if text else ""
+
+
+# ── storage XHTML → .docx ───────────────────────────────────────────────
+
+_HEADING_LEVELS = {f"h{n}": n for n in range(1, 7)}
+_BLOCK_FLATTEN_TAGS = {"div", "root", "layout", "layout-section", "layout-cell"}
+
+
+def _render_document(title: str, root: etree._Element) -> bytes:
+    document = DocxDocument()
+    document.add_heading(title or "", level=0)
+    _render_blocks(document, root)
+    buf = BytesIO()
+    document.save(buf)
+    return buf.getvalue()
+
+
+def _render_blocks(document: DocxDocument, container: etree._Element) -> None:
+    for element in container:
+        tag = _local(element.tag)
+
+        if tag in _HEADING_LEVELS:
+            _add_inline_runs(document.add_heading("", level=_HEADING_LEVELS[tag]), element)
+        elif tag == "p":
+            _add_inline_runs(document.add_paragraph(), element)
+        elif tag in ("ul", "ol"):
+            _render_list(document, element, ordered=(tag == "ol"))
+        elif tag == "table":
+            _render_table(document, element)
+        elif tag == "blockquote":
+            try:
+                paragraph = document.add_paragraph(style="Intense Quote")
+            except KeyError:  # 기본 템플릿에 그 스타일이 없을 수도 있음
+                paragraph = document.add_paragraph()
+            _add_inline_runs(paragraph, element)
+        elif _is_ac(element, "image"):
+            _render_image_placeholder(document, element)
+        elif _is_ac(element, "structured-macro"):
+            _render_macro(document, element)
+        elif tag in _BLOCK_FLATTEN_TAGS:
+            # 레이아웃용 래퍼(ac:layout 등) - 내용만 순서대로 펼친다.
+            _render_blocks(document, element)
+        elif _clean_text(element.text).strip() or len(element):
+            # 알 수 없는 블록 요소 - 내용은 최대한 살려서 평문단으로.
+            _add_inline_runs(document.add_paragraph(), element)
+
+
+def _render_macro(document: DocxDocument, macro: etree._Element) -> None:
+    body = macro.find("ac:rich-text-body", namespaces={"ac": _AC_NS})
+    if body is not None:
+        _render_blocks(document, body)
+        return
+    name = macro.get(f"{{{_AC_NS}}}name") or "매크로"
+    note = document.add_paragraph(f"[{name} 매크로 - 이 변환에서는 지원하지 않습니다]")
+    note.runs[0].italic = True
+
+
+def _render_image_placeholder(document: DocxDocument, image: etree._Element) -> None:
+    attachment = image.find("ri:attachment", namespaces={"ri": _RI_NS})
+    filename = attachment.get(f"{{{_RI_NS}}}filename") if attachment is not None else None
+    note = document.add_paragraph(f"[이미지: {filename}]" if filename else "[이미지]")
+    note.runs[0].italic = True
+
+
+def _render_list(document: DocxDocument, list_element: etree._Element, *, ordered: bool) -> None:
+    style = "List Number" if ordered else "List Bullet"
+    for item in list_element:
+        if _local(item.tag) != "li":
+            continue
+        # 중첩 리스트는 들여쓰기를 구분하지 않고 바로 뒤이어 평평하게 펼친다(알려진 단순화).
+        nested = [child for child in item if _local(child.tag) in ("ul", "ol")]
+        for nested_list in nested:
+            item.remove(nested_list)
+        try:
+            paragraph = document.add_paragraph(style=style)
+        except KeyError:
+            paragraph = document.add_paragraph()
+        _add_inline_runs(paragraph, item)
+        for nested_list in nested:
+            _render_list(document, nested_list, ordered=(_local(nested_list.tag) == "ol"))
+
+
+def _render_table(document: DocxDocument, table_element: etree._Element) -> None:
+    rows: List[List[etree._Element]] = []
+    for section in table_element:
+        section_tag = _local(section.tag)
+        if section_tag in ("thead", "tbody", "tfoot"):
+            rows.extend([tr for tr in section if _local(tr.tag) == "tr"])
+        elif section_tag == "tr":
+            rows.append(section)
+
+    cell_rows = [[cell for cell in row if _local(cell.tag) in ("td", "th")] for row in rows]
+    if not cell_rows:
+        return
+    col_count = max(len(row) for row in cell_rows)
+
+    table = document.add_table(rows=len(cell_rows), cols=col_count)
+    try:
+        table.style = "Table Grid"
+    except KeyError:
+        pass
+
+    for row_index, cells in enumerate(cell_rows):
+        col_index = 0
+        for cell in cells:
+            if col_index >= col_count:
+                break
+            colspan = max(1, _int_attr(cell, "colspan"))
+            span = min(colspan, col_count - col_index)
+            docx_cell = table.cell(row_index, col_index)
+            if span > 1:
+                docx_cell = docx_cell.merge(table.cell(row_index, col_index + span - 1))
+            docx_cell.text = ""
+            _add_inline_runs(docx_cell.paragraphs[0], cell)
+            col_index += span
+
+
+def _int_attr(element: etree._Element, name: str) -> int:
+    value = element.get(name)
+    try:
+        return int(value) if value else 1
+    except ValueError:
+        return 1
+
+
+_INLINE_STYLE_TAGS = {"strong": "bold", "b": "bold", "em": "italic", "i": "italic", "u": "underline"}
+
+
+def _add_inline_runs(paragraph, element: etree._Element, *, bold=False, italic=False, underline=False) -> None:
+    text = _clean_text(element.text)
+    if text:
+        _add_run(paragraph, text, bold, italic, underline)
+
+    for child in element:
+        tag = _local(child.tag)
+        if tag == "br":
+            paragraph.add_run().add_break()
+        elif tag in _INLINE_STYLE_TAGS:
+            kwargs = {"bold": bold, "italic": italic, "underline": underline}
+            kwargs[_INLINE_STYLE_TAGS[tag]] = True
+            _add_inline_runs(paragraph, child, **kwargs)
+        else:
+            # a(링크, 글자만 살리고 하이퍼링크는 안 만듦)/span/code 등 - 내용은 그대로 펼친다.
+            _add_inline_runs(paragraph, child, bold=bold, italic=italic, underline=underline)
+
+        tail = _clean_text(child.tail)
+        if tail:
+            _add_run(paragraph, tail, bold, italic, underline)
+
+
+def _add_run(paragraph, text: str, bold: bool, italic: bool, underline: bool) -> None:
+    run = paragraph.add_run(text)
+    run.bold = bold or None
+    run.italic = italic or None
+    run.underline = underline or None
+
+
 _UNSAFE_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|]')
 
 
 def _safe_filename(title: str) -> str:
-    cleaned = _UNSAFE_FILENAME_CHARS.sub("", title).strip()
+    cleaned = _UNSAFE_FILENAME_CHARS.sub("", title or "").strip()
     return (cleaned or "report") + ".docx"
-
-
-# doc2report(sources/confluence.py)는 토큰을 os.environ["CONFLUENCE_API_TOKEN"]에서만
-# 읽는다(인자로 넘길 방법이 없다) - 그래서 변환 한 번 동안만 전역 환경변수를 이 요청의
-# 토큰으로 바꿔 쓰고 끝나면 되돌린다. app.py가 threaded=True로 띄우므로, 동시에 다른
-# 사용자가 변환을 요청하면 서로의 토큰을 덮어쓸 수 있어 락으로 직렬화한다 - 사내
-# 소규모 팀 도구라 변환 요청이 실제로 겹칠 일은 드물고, 겹쳐도 뒤 요청이 잠깐
-# 기다리는 것뿐이라 안전한 쪽을 택했다.
-_env_token_lock = threading.Lock()
 
 
 def convert_confluence_url_to_docx(url: str, *, token: Optional[str] = None) -> Tuple[bytes, str]:
@@ -109,17 +350,11 @@ def convert_confluence_url_to_docx(url: str, *, token: Optional[str] = None) -> 
 
     token을 안 주면 전역 CONFLUENCE_API_TOKEN을 쓴다 - 호출부(app.py)는 보통
     resolve_token()으로 사용자별 토큰을 먼저 구해서 넘긴다.
-
-    doc2report 미설치/URL·토큰 미설정이면 DocxExportUnavailable. 그 외 실패
-    (페이지를 못 찾음, 권한 없음, 네트워크 오류 등)는 doc2report가 던지는
-    RuntimeError가 그대로 올라온다 - 호출부에서 str(exc)로 사용자에게 보여주면 된다.
     """
-    try:
-        from doc2report.pipeline import convert
-    except ImportError as exc:
+    if not _rendering_dependencies_installed():
         raise DocxExportUnavailable(
-            "doc2report가 설치되지 않았습니다. requirements.txt를 다시 설치해주세요."
-        ) from exc
+            "python-docx/lxml이 설치되지 않았습니다. requirements.txt를 다시 설치해주세요."
+        )
 
     if not is_url_configured():
         raise DocxExportUnavailable(
@@ -133,19 +368,21 @@ def convert_confluence_url_to_docx(url: str, *, token: Optional[str] = None) -> 
             "관리자가 CONFLUENCE_API_TOKEN 환경변수를 설정해야 합니다."
         )
 
-    with _env_token_lock:
-        previous = os.environ.get("CONFLUENCE_API_TOKEN")
-        os.environ["CONFLUENCE_API_TOKEN"] = effective_token
-        try:
-            with tempfile.TemporaryDirectory(prefix="docx-export-") as tmp:
-                out_path = Path(tmp) / "report.docx"
-                result = convert(url, output=out_path)
-                data = out_path.read_bytes()
-        finally:
-            if previous is None:
-                os.environ.pop("CONFLUENCE_API_TOKEN", None)
-            else:
-                os.environ["CONFLUENCE_API_TOKEN"] = previous
+    page_id = _page_id_from_url(url)
+    if page_id is None:
+        raise RuntimeError(
+            f"URL에서 페이지 ID를 못 찾았습니다: {url}\n"
+            "'/pages/123456', '?pageId=123456' 형태이거나 페이지 ID 숫자 자체여야 합니다."
+        )
 
-    title = (result.document.title or "").strip() or "report"
+    base_url = _normalize_base_url(os.environ.get("CONFLUENCE_URL", "").strip())
+    page = _fetch_page(base_url, page_id, effective_token)
+
+    storage_html = page.get("body", {}).get("storage", {}).get("value")
+    if not storage_html:
+        raise RuntimeError(f"페이지 {page_id}에 storage 본문이 없습니다. 접근 권한을 확인하세요.")
+
+    title = page.get("title") or url
+    root = _parse_storage(storage_html)
+    data = _render_document(title, root)
     return data, _safe_filename(title)

@@ -447,7 +447,7 @@ def confluence_to_docx():
     except DocxExportUnavailable as e:
         return redirect(f"/?docx_error={quote(str(e))}")
     except Exception as e:
-        # 페이지를 못 찾음/권한 없음/네트워크 오류 등 doc2report가 던지는 오류.
+        # 페이지를 못 찾음/권한 없음/네트워크 오류 등 docx_export.py가 던지는 오류.
         return redirect(f"/?docx_error={quote(f'변환 실패: {e}')}")
 
     return send_file(
