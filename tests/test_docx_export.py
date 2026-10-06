@@ -138,6 +138,14 @@ class VerifyTokenTest(unittest.TestCase):
         with mock.patch("requests.get", return_value=resp):
             self.assertEqual(verify_token("my-pat"), "권동혁")
 
+    def test_no_proxy_true_forces_direct_connection(self):
+        resp = _fake_response(json_data={"type": "known", "displayName": "권동혁"})
+        with mock.patch.dict(os.environ, {"CONFLUENCE_NO_PROXY": "true"}):
+            with mock.patch("requests.get", return_value=resp) as fake_get:
+                verify_token("my-pat")
+
+        self.assertEqual(fake_get.call_args.kwargs["proxies"], {"http": None, "https": None})
+
 
 class ConvertConfluenceUrlToDocxGuardsTest(unittest.TestCase):
     def test_raises_unavailable_when_rendering_dependencies_missing(self):
@@ -281,6 +289,31 @@ class ConvertConfluenceUrlToDocxHttpTest(unittest.TestCase):
         headers = fake_get.call_args.kwargs["headers"]
         self.assertEqual(headers["X-My-Dep-Ticket"], "DEP-1234")
         self.assertNotIn("X-Dep-Ticket", headers)
+
+    def test_no_proxy_defaults_to_using_environment_proxy(self):
+        resp = _page_response("<p>본문</p>")
+        with mock.patch("requests.get", return_value=resp) as fake_get:
+            convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+        self.assertIsNone(fake_get.call_args.kwargs["proxies"])
+
+    def test_no_proxy_true_forces_direct_connection(self):
+        """사내 프록시가 Confluence API 호출을 제대로 못 넘겨서 실패하면
+        CONFLUENCE_NO_PROXY=true로 우회한다(mailer.py의 MAIL_API_NO_PROXY와 같은 패턴)."""
+        with mock.patch.dict(os.environ, {"CONFLUENCE_NO_PROXY": "true"}):
+            resp = _page_response("<p>본문</p>")
+            with mock.patch("requests.get", return_value=resp) as fake_get:
+                convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+        self.assertEqual(fake_get.call_args.kwargs["proxies"], {"http": None, "https": None})
+
+    def test_no_proxy_false_explicitly_uses_environment_proxy(self):
+        with mock.patch.dict(os.environ, {"CONFLUENCE_NO_PROXY": "false"}):
+            resp = _page_response("<p>본문</p>")
+            with mock.patch("requests.get", return_value=resp) as fake_get:
+                convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+        self.assertIsNone(fake_get.call_args.kwargs["proxies"])
 
     def test_filename_strips_unsafe_characters_and_adds_docx_extension(self):
         resp = _page_response("<p>본문</p>", title="예산안 승인 / 2026")

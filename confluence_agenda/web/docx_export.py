@@ -202,6 +202,21 @@ def _ssl_verify():
     return True
 
 
+def _parse_bool_env(value: Optional[str], *, default: bool) -> bool:
+    if value is None or not value.strip():
+        return default
+    return value.strip().lower() not in ("false", "0", "no", "off")
+
+
+def _proxies():
+    """사내 프록시(HTTP_PROXY/HTTPS_PROXY)가 사내 Confluence API 호출을 제대로
+    못 넘기는 경우가 있다(mailer.py의 MAIL_API_NO_PROXY와 같은 문제).
+    CONFLUENCE_NO_PROXY=true면 환경변수 프록시를 무시하고 이 호출만 직접
+    나가도록 강제한다."""
+    no_proxy = _parse_bool_env(os.environ.get("CONFLUENCE_NO_PROXY"), default=False)
+    return {"http": None, "https": None} if no_proxy else None
+
+
 def verify_token(token: str) -> str:
     """이 PAT이 실제로 유효한지, Confluence가 보기에 누구 것인지 확인한다.
 
@@ -226,6 +241,7 @@ def verify_token(token: str) -> str:
             headers=_request_headers(token),
             timeout=30,
             verify=_ssl_verify(),
+            proxies=_proxies(),
         )
     except requests.RequestException as exc:
         raise RuntimeError(
@@ -258,6 +274,7 @@ def _fetch_page(base_url: str, page_id: str, token: str) -> dict:
             headers=_request_headers(token),
             timeout=30,
             verify=_ssl_verify(),
+            proxies=_proxies(),
         )
     except requests.RequestException as exc:
         raise RuntimeError(
