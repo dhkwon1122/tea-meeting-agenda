@@ -66,6 +66,11 @@ include/children으로 한 문서에 합쳐지고 나면 어느 이미지가 원
 페이지 것이었는지 더는 구분할 수 없으므로, 각 페이지를 펼치는 바로 그
 자리에서(합치기 전에) 미리 받아 둔다. 첨부파일을 못 찾거나 받아오지
 못하면(네트워크 오류 등) 예전처럼 파일명만 보여주는 자리표시자로 빠진다.
+이미지는 블록 자리(_render_image, 새 문단으로 그림)와 문단 "안"(인라인
+위치, _add_inline_image, 그 문단의 런으로 그림) 둘 다에서 나올 수 있다 -
+Confluence는 "<p><ac:image>...</ac:image></p>"처럼 문단 안에 끼워 넣는
+경우가 흔한데, 처음엔 인라인 쪽을 몰라서 이미지가 자리표시자조차 없이
+통째로 사라지는 버그가 있었다(실사용에서 발견).
 
 CONFLUENCE_URL이 없으면 이 기능 자체가 꺼진다(is_feature_available() False).
 
@@ -1293,9 +1298,9 @@ def _render_blocks(document: DocxDocument, container: etree._Element, state: "_R
             # 번호 체계에 접지 않고 문서 제목 서식을 쓰며, 항목 번호를 새로 센다.
             state.counters.clear()
             element.text = _pad_title_text(element.text)
-            _add_inline_runs(document.add_heading("", level=0), element)
+            _add_inline_runs(document.add_heading("", level=0), element, state.images)
         elif tag == "listitem":
-            _render_listitem(document, element, state.counters)
+            _render_listitem(document, element, state.counters, state.images)
         elif tag == "tablecaption":
             paragraph = document.add_paragraph()
             paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -1306,26 +1311,26 @@ def _render_blocks(document: DocxDocument, container: etree._Element, state: "_R
             inner_paragraphs = [child for child in element if _local(child.tag) == "p"]
             for source in inner_paragraphs or [element]:
                 paragraph = document.add_paragraph()
-                _add_inline_runs(paragraph, source)
+                _add_inline_runs(paragraph, source, state.images)
                 for run in paragraph.runs:
                     run.font.size = Pt(10)
         elif tag in _HEADING_LEVELS:
             # _fold_headings_into_levels가 보통 다 listitem으로 바꿔서 여기까지
             # 안 오지만(표 셀 안 등 그 변환이 안 들어간 자리를 위한 안전망), 혹시
             # 남아 있으면 기존 방식(Heading 스타일)으로라도 렌더링한다.
-            _add_inline_runs(document.add_heading("", level=_HEADING_LEVELS[tag]), element)
+            _add_inline_runs(document.add_heading("", level=_HEADING_LEVELS[tag]), element, state.images)
         elif tag == "p":
-            _add_inline_runs(document.add_paragraph(), element)
+            _add_inline_runs(document.add_paragraph(), element, state.images)
         elif tag in ("ul", "ol"):
-            _render_list(document, element, ordered=(tag == "ol"))
+            _render_list(document, element, state.images, ordered=(tag == "ol"))
         elif tag == "table":
-            _render_table(document, element)
+            _render_table(document, element, state.images)
         elif tag == "blockquote":
             try:
                 paragraph = document.add_paragraph(style="Intense Quote")
             except KeyError:  # 기본 템플릿에 그 스타일이 없을 수도 있음
                 paragraph = document.add_paragraph()
-            _add_inline_runs(paragraph, element)
+            _add_inline_runs(paragraph, element, state.images)
         elif _is_ac(element, "image"):
             _render_image(document, element, state.images)
         elif _is_ac(element, "structured-macro"):
@@ -1335,10 +1340,12 @@ def _render_blocks(document: DocxDocument, container: etree._Element, state: "_R
             _render_blocks(document, element, state)
         elif _clean_text(element.text).strip() or len(element):
             # 알 수 없는 블록 요소 - 내용은 최대한 살려서 평문단으로.
-            _add_inline_runs(document.add_paragraph(), element)
+            _add_inline_runs(document.add_paragraph(), element, state.images)
 
 
-def _render_listitem(document: DocxDocument, element: etree._Element, counters: dict) -> None:
+def _render_listitem(
+    document: DocxDocument, element: etree._Element, counters: dict, images: dict
+) -> None:
     """번호 체계 단계(1./□/-/·) 항목 하나를 렌더링한다 - doc2report의
     render/docx_writer.py::_list_item을 참고해 새로 구현(내어쓰기/탭 정렬,
     말머리 자동 번호 매기기)."""
@@ -1358,7 +1365,7 @@ def _render_listitem(document: DocxDocument, element: etree._Element, counters: 
         paragraph.paragraph_format.tab_stops.add_tab_stop(Mm(level["indent_mm"]))
         marker_run = paragraph.add_run(marker + "\t")
         marker_run.bold = bold or None
-    _add_inline_runs(paragraph, element, bold=bold)
+    _add_inline_runs(paragraph, element, images, bold=bold)
 
 
 def _format_marker(template: str, depth: int, counters: dict) -> str:
@@ -1393,30 +1400,66 @@ def _render_macro(document: DocxDocument, macro: etree._Element, state: "_Render
 _MAX_IMAGE_WIDTH_MM = 170
 
 
+def _resolve_image_bytes(image: etree._Element, images: dict) -> Optional[bytes]:
+    return images.get(image.get("data-image-key"))
+
+
+def _image_placeholder_text(image: etree._Element) -> str:
+    attachment = image.find("ri:attachment", namespaces={"ri": _RI_NS})
+    filename = attachment.get(f"{{{_RI_NS}}}filename") if attachment is not None else None
+    return f"[이미지: {filename}]" if filename else "[이미지]"
+
+
+def _shrink_picture_to_max_width(picture) -> None:
+    max_width = Mm(_MAX_IMAGE_WIDTH_MM)
+    if picture.width > max_width:
+        ratio = max_width / picture.width
+        picture.width = max_width
+        picture.height = int(picture.height * ratio)
+
+
 def _render_image(document: DocxDocument, image: etree._Element, images: dict) -> None:
-    """ac:image를 실제 첨부파일 내용으로 그려 넣는다 - convert_confluence_url_to_docx가
-    렌더링 전에 _fetch_images_for_page()로 미리 받아 둔 바이트를 쓴다.
-    못 받아왔으면(첨부파일을 못 찾음, 네트워크 오류 등) 예전처럼 파일명만
-    보여주는 자리표시자로 대신한다."""
-    data = images.get(image.get("data-image-key"))
+    """블록 위치(문단 바로 자리)의 ac:image를 실제 첨부파일 내용으로 그려
+    넣는다 - convert_confluence_url_to_docx가 렌더링 전에
+    _fetch_images_for_page()로 미리 받아 둔 바이트를 쓴다. 못 받아왔으면
+    (첨부파일을 못 찾음, 네트워크 오류 등) 예전처럼 파일명만 보여주는
+    자리표시자로 대신한다."""
+    data = _resolve_image_bytes(image, images)
     if data:
         try:
             picture = document.add_picture(BytesIO(data))
-            max_width = Mm(_MAX_IMAGE_WIDTH_MM)
-            if picture.width > max_width:
-                ratio = max_width / picture.width
-                picture.width = max_width
-                picture.height = int(picture.height * ratio)
+            _shrink_picture_to_max_width(picture)
             return
         except Exception:
             pass  # 깨진 이미지 등 - 아래 자리표시자로 대신한다.
-    attachment = image.find("ri:attachment", namespaces={"ri": _RI_NS})
-    filename = attachment.get(f"{{{_RI_NS}}}filename") if attachment is not None else None
-    note = document.add_paragraph(f"[이미지: {filename}]" if filename else "[이미지]")
+    note = document.add_paragraph(_image_placeholder_text(image))
     note.runs[0].italic = True
 
 
-def _render_list(document: DocxDocument, list_element: etree._Element, *, ordered: bool) -> None:
+def _add_inline_image(paragraph, image: etree._Element, images: dict) -> None:
+    """문단 "중간"(인라인 위치)의 ac:image - Confluence가 이미지를
+    <p><ac:image>...</ac:image></p>처럼 문단 안에 끼워 넣는 경우가 많아서
+    (실제 변환에서 발견: _render_image는 블록 자리에서만 호출되고,
+    _add_inline_runs는 ac:image를 모르는 태그로 보고 그냥 건너뛰어
+    버려서 이미지가 자리표시자조차 없이 통째로 사라졌다) 문단 밖에 새
+    문단을 만들 수 없는 이 자리에서는 run.add_picture()로 같은 문단
+    안에 그려 넣는다."""
+    data = _resolve_image_bytes(image, images)
+    if data:
+        try:
+            run = paragraph.add_run()
+            picture = run.add_picture(BytesIO(data))
+            _shrink_picture_to_max_width(picture)
+            return
+        except Exception:
+            pass
+    run = paragraph.add_run(_image_placeholder_text(image))
+    run.italic = True
+
+
+def _render_list(
+    document: DocxDocument, list_element: etree._Element, images: dict, *, ordered: bool
+) -> None:
     style = "List Number" if ordered else "List Bullet"
     for item in list_element:
         if _local(item.tag) != "li":
@@ -1429,9 +1472,9 @@ def _render_list(document: DocxDocument, list_element: etree._Element, *, ordere
             paragraph = document.add_paragraph(style=style)
         except KeyError:
             paragraph = document.add_paragraph()
-        _add_inline_runs(paragraph, item)
+        _add_inline_runs(paragraph, item, images)
         for nested_list in nested:
-            _render_list(document, nested_list, ordered=(_local(nested_list.tag) == "ol"))
+            _render_list(document, nested_list, images, ordered=(_local(nested_list.tag) == "ol"))
 
 
 # 표 전체 폭 - A4 폭(210mm)에서 좌우 여백(20mm씩)을 뺀 값과 같다(이미지의
@@ -1507,7 +1550,7 @@ def _apply_content_based_column_widths(
     tbl_w.set(qn("w:w"), str(total_dxa))
 
 
-def _render_table(document: DocxDocument, table_element: etree._Element) -> None:
+def _render_table(document: DocxDocument, table_element: etree._Element, images: dict) -> None:
     rows: List[etree._Element] = []
     for section in table_element:
         section_tag = _local(section.tag)
@@ -1559,7 +1602,7 @@ def _render_table(document: DocxDocument, table_element: etree._Element) -> None
         if end_row != row_index or end_col != col_index:
             docx_cell = docx_cell.merge(table.cell(end_row, end_col))
         is_header = _local(cell.tag) == "th"
-        _render_cell_content(docx_cell, cell, bold=is_header)
+        _render_cell_content(docx_cell, cell, images, bold=is_header)
         if is_header:
             _shade_cell(docx_cell, _TABLE_HEADER_SHADING_HEX)
 
@@ -1567,7 +1610,7 @@ def _render_table(document: DocxDocument, table_element: etree._Element) -> None
 _CELL_BLOCK_TAGS = ("p", "ul", "ol")
 
 
-def _render_cell_content(docx_cell, source_cell: etree._Element, *, bold: bool) -> None:
+def _render_cell_content(docx_cell, source_cell: etree._Element, images: dict, *, bold: bool) -> None:
     """표 칸 안의 내용을 채운다 - 칸 안에 <p>가 여러 개면(Confluence 표 칸은
     흔히 그렇다) 각각 별도 문단으로 넣어야 줄바꿈이 보인다. 예전에는 칸
     전체를 _add_inline_runs 한 번으로 평문단에 몰아 넣어서, <p> 여러 개가
@@ -1590,7 +1633,7 @@ def _render_cell_content(docx_cell, source_cell: etree._Element, *, bold: bool) 
     for index, source in enumerate(paragraph_sources):
         paragraph = docx_cell.paragraphs[0] if index == 0 else docx_cell.add_paragraph()
         paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        _add_inline_runs(paragraph, source, bold=bold)
+        _add_inline_runs(paragraph, source, images, bold=bold)
         for run in paragraph.runs:
             run.font.size = Pt(10)
             _set_east_asian_font(run.font, _DOCUMENT_FONT_NAME)
@@ -1607,7 +1650,9 @@ def _int_attr(element: etree._Element, name: str) -> int:
 _INLINE_STYLE_TAGS = {"strong": "bold", "b": "bold", "em": "italic", "i": "italic", "u": "underline"}
 
 
-def _add_inline_runs(paragraph, element: etree._Element, *, bold=False, italic=False, underline=False) -> None:
+def _add_inline_runs(
+    paragraph, element: etree._Element, images: dict, *, bold=False, italic=False, underline=False
+) -> None:
     text = _clean_text(element.text)
     if text:
         _add_run(paragraph, text, bold, italic, underline)
@@ -1619,7 +1664,14 @@ def _add_inline_runs(paragraph, element: etree._Element, *, bold=False, italic=F
         elif tag in _INLINE_STYLE_TAGS:
             kwargs = {"bold": bold, "italic": italic, "underline": underline}
             kwargs[_INLINE_STYLE_TAGS[tag]] = True
-            _add_inline_runs(paragraph, child, **kwargs)
+            _add_inline_runs(paragraph, child, images, **kwargs)
+        elif _is_ac(child, "image"):
+            # Confluence는 이미지를 흔히 <p><ac:image>...</ac:image></p>처럼
+            # 문단 "안"에 끼워 넣는다 - 이 경로를 몰라서 그냥 건너뛰면(알 수
+            # 없는 태그로 보고 재귀했다가 텍스트가 없어 아무것도 안 생김)
+            # 이미지가 자리표시자조차 없이 통째로 사라진다(실제 변환에서
+            # 발견된 버그 - "이미지 파일명 그런 자리표시자도 안 보여").
+            _add_inline_image(paragraph, child, images)
         elif _is_ac(child, "structured-macro"):
             # 문단 중간에 끼어드는 매크로(anchor/create-from-template 등, 이
             # 프로젝트의 builder.py가 실제로 이렇게 쓴다) - rich-text-body가
@@ -1629,11 +1681,11 @@ def _add_inline_runs(paragraph, element: etree._Element, *, bold=False, italic=F
             # "3877634148" 템플릿 ID가 본문에 그대로 섞여 나오던 문제).
             body = child.find("ac:rich-text-body", namespaces={"ac": _AC_NS})
             if body is not None:
-                _add_inline_runs(paragraph, body, bold=bold, italic=italic, underline=underline)
+                _add_inline_runs(paragraph, body, images, bold=bold, italic=italic, underline=underline)
         else:
             # a(링크, 글자만 살리고 하이퍼링크는 안 만듦)/span/code/ac:link 등 -
             # 내용은 그대로 펼친다.
-            _add_inline_runs(paragraph, child, bold=bold, italic=italic, underline=underline)
+            _add_inline_runs(paragraph, child, images, bold=bold, italic=italic, underline=underline)
 
         tail = _clean_text(child.tail)
         if tail:

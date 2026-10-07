@@ -1291,6 +1291,44 @@ class ImageEmbeddingTest(unittest.TestCase):
         self.assertEqual(len(document.inline_shapes), 1)
         self.assertFalse(any("shot.png" in t for t in _docx_paragraph_texts(data)))
 
+    def test_image_wrapped_in_p_tag_is_still_embedded_not_silently_dropped(self):
+        # Confluence는 이미지를 흔히 <p><ac:image>...</ac:image></p>처럼 문단
+        # "안"에 끼워 넣는다 - _add_inline_runs가 ac:image를 모르는 태그로
+        # 보고 건너뛰면 자리표시자조차 없이 통째로 사라졌다(실사용 보고:
+        # "이미지 파일명 그런 자리표시자도 안 보여").
+        root_storage = (
+            "<h2>스크린샷</h2>"
+            '<p><ac:image xmlns:ac="http://www.atlassian.com/schema/confluence/4/ac/" '
+            'xmlns:ri="http://www.atlassian.com/schema/confluence/4/ri/">'
+            '<ri:attachment ri:filename="shot.png"/>'
+            "</ac:image></p>"
+        )
+        root_resp = _page_response(root_storage, title="회의록")
+        attachments_resp = _fake_response(
+            json_data={
+                "results": [
+                    {"title": "shot.png", "_links": {"download": "/download/attachments/123/shot.png"}}
+                ]
+            }
+        )
+        download_resp = _fake_response(text="")
+        download_resp.content = _PNG_1PX
+
+        def fake_get(url, **kwargs):
+            if url.endswith("/rest/api/content/123"):
+                return root_resp
+            if url.endswith("/rest/api/content/123/child/attachment"):
+                return attachments_resp
+            if url.endswith("/download/attachments/123/shot.png"):
+                return download_resp
+            raise AssertionError(f"unexpected url: {url}")
+
+        with mock.patch("requests.get", side_effect=fake_get):
+            data, _ = convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+        document = DocxDocument(io.BytesIO(data))
+        self.assertEqual(len(document.inline_shapes), 1)
+
     def test_image_without_matching_attachment_falls_back_to_placeholder(self):
         root_storage = (
             '<ac:image xmlns:ac="http://www.atlassian.com/schema/confluence/4/ac/" '
