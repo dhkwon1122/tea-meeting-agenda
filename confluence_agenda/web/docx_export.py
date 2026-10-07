@@ -20,8 +20,20 @@ sources/confluence.py::LinkedPages를 참고해 직접 구현, 아래 "연결된
 
 글꼴/서식은 doc2report의 profiles/confluence.yaml(+ extends: default인
 profiles/default.yaml) 값을 그대로 옮겼다(_configure_document_styles) -
-맑은 고딕, 본문 12pt, 제목(문서 맨 위) 18pt·가운데·밑줄, 표 10pt, 여백
-20mm, 표 머리행 음영 F2F2F2.
+맑은 고딕, 본문 12pt, 제목(문서 맨 위 + 연결된 각 페이지 제목) 18pt·
+가운데·굵게·밑줄(글자 앞뒤에 공백을 하나씩 둬서 밑줄이 조금 더 길어
+보이게 함), 표 10pt, 여백 20mm, 표 머리행 음영 F2F2F2. python-docx
+기본 템플릿의 Title/Heading 스타일은 글꼴을 이름이 아니라 테마 참조로도
+갖고 있어서(우리가 지정한 이름과 같이 있으면 워드가 테마를 우선시함) 그
+테마 참조를 명시적으로 지운다(_set_east_asian_font) - 안 지우면 제목이
+다른 글꼴로 보인다. Title 스타일은 밑줄과는 별개로 문단 테두리(가로줄)도
+기본으로 갖고 있어서 그것도 지운다(안 지우면 밑줄 밑에 테두리가 하나 더
+생겨 "긴 밑줄"처럼 보인다).
+
+표 칸의 폭은 python-docx 기본값(모든 열이 똑같은 폭)이 아니라 칸 안
+글자 양에 비례해서 미리 계산해 지정한다(_apply_content_based_column_widths,
+한글/한자 등 전각 문자는 2칸으로 셈) - 글자가 거의 없는 열이 글자가
+많은 열과 같은 폭으로 어색하게 눌리거나 늘어나는 문제가 있었다.
 
 구조적 변환(_fold_headings_into_levels/_tag_table_captions_and_notes)도
 doc2report의 transform/structure.py를 참고해 들여왔다 - 제목(h1~h6)과 그
@@ -1166,14 +1178,29 @@ _HEADING_FONT_SIZES_PT = {1: 15, 2: 14, 3: 14}  # 4~6단계는 3단계 값을 �
 _TABLE_HEADER_SHADING_HEX = "F2F2F2"
 
 
+_THEME_FONT_ATTRS = ("asciiTheme", "hAnsiTheme", "eastAsiaTheme", "cstheme")
+
+
 def _set_east_asian_font(font, name: str) -> None:
     """python-docx의 Font.name은 ascii/hAnsi만 설정하고 eastAsia(한글 글꼴)는
     안 건드려서, 한글 문서에서 영문 글꼴로 보이는 걸 막으려면 w:eastAsia를
     직접 oxml로 설정해야 한다. font._element는 런(CT_R)이든 스타일(CT_Style)이든
-    get_or_add_rPr()을 지원해서 둘 다 같은 방식으로 처리된다."""
+    get_or_add_rPr()을 지원해서 둘 다 같은 방식으로 처리된다.
+
+    python-docx의 기본 Title/Heading 스타일은 글꼴을 이름이 아니라 테마
+    참조(w:asciiTheme="majorHAnsi" 등)로 지정해 두는데, font.name을 설정해도
+    이 테마 속성은 안 지워져서 w:ascii(우리가 지정한 이름)와 테마 참조가
+    동시에 남는다 - 워드는 이때 테마 참조를 우선해 버려서 우리가 지정한
+    글꼴(맑은 고딕)이 무시되고 테마 기본 글꼴로 보이는 문제가 실제로 있었다
+    (제목만 다른 글꼴로 보이던 원인). 테마 속성을 직접 지워서 우리가 지정한
+    이름이 확실히 적용되게 한다."""
     font.name = name
     r_pr = font._element.get_or_add_rPr()
-    r_pr.get_or_add_rFonts().set(qn("w:eastAsia"), name)
+    r_fonts = r_pr.get_or_add_rFonts()
+    r_fonts.set(qn("w:eastAsia"), name)
+    for attr in _THEME_FONT_ATTRS:
+        if r_fonts.get(qn(f"w:{attr}")) is not None:
+            del r_fonts.attrib[qn(f"w:{attr}")]
 
 
 def _shade_cell(cell, hex_color: str) -> None:
@@ -1202,6 +1229,14 @@ def _configure_document_styles(document: DocxDocument) -> None:
     title_style.font.bold = True
     title_style.font.underline = True
     title_style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    # python-docx 기본 템플릿의 "Title" 스타일은 밑줄과는 별개로 문단 아래에
+    # 가로줄(테두리, w:pBdr)이 하나 더 있어서, 우리가 지정한 글자 밑줄과
+    # 합쳐져 "제목 아래에 긴 밑줄이 생긴다"처럼 보였다(사용자 보고) - 그
+    # 테두리를 지운다. 밑줄(위에서 설정한 font.underline)은 그대로 남는다.
+    p_pr = title_style.element.get_or_add_pPr()
+    p_bdr = p_pr.find(qn("w:pBdr"))
+    if p_bdr is not None:
+        p_pr.remove(p_bdr)
 
     for level in range(1, 7):
         try:
@@ -1224,13 +1259,21 @@ class _RenderState:
         self.images: dict = images or {}
 
 
+def _pad_title_text(text: Optional[str]) -> str:
+    """제목 글자 앞뒤에 공백 하나씩 붙인다 - 밑줄(글자 밑줄)이 그 공백까지
+    덮어서 제목이 조금 더 길게 밑줄 쳐진 것처럼 보이게 한다(사용자 요청:
+    "앞뒤로 공백을 줘서 밑줄이 조금 더 길어보여도 좋겠네")."""
+    stripped = (text or "").strip()
+    return f" {stripped} " if stripped else stripped
+
+
 def _render_document(title: str, root: etree._Element, images: Optional[dict] = None) -> bytes:
     _tag_table_captions_and_notes(root)
     _fold_headings_into_levels(root)
 
     document = DocxDocument()
     _configure_document_styles(document)
-    document.add_heading(title or "", level=0)
+    document.add_heading(_pad_title_text(title), level=0)
     _render_blocks(document, root, _RenderState(images))
     buf = BytesIO()
     document.save(buf)
@@ -1249,6 +1292,7 @@ def _render_blocks(document: DocxDocument, container: etree._Element, state: "_R
             # 연결된 페이지의 제목 - doc2report의 Heading.page_title과 같이
             # 번호 체계에 접지 않고 문서 제목 서식을 쓰며, 항목 번호를 새로 센다.
             state.counters.clear()
+            element.text = _pad_title_text(element.text)
             _add_inline_runs(document.add_heading("", level=0), element)
         elif tag == "listitem":
             _render_listitem(document, element, state.counters)
@@ -1390,6 +1434,63 @@ def _render_list(document: DocxDocument, list_element: etree._Element, *, ordere
             _render_list(document, nested_list, ordered=(_local(nested_list.tag) == "ol"))
 
 
+# 표 전체 폭 - A4 폭(210mm)에서 좌우 여백(20mm씩)을 뺀 값과 같다(이미지의
+# 최대 폭과도 같은 기준).
+_TABLE_USABLE_WIDTH_MM = 170
+# 빈 칸이나 아주 짧은 칸도 너무 좁게 눌리지 않게 주는 최소 가중치(글자 수
+# 기준) - 숫자가 아니라 "최소 이 정도 폭은 있어야 한다"는 바닥값 역할이다.
+_TABLE_MIN_COLUMN_WEIGHT = 6
+# 한글/한자/가나 등 전각 문자는 라틴 문자보다 약 2배 넓게 보이므로, 폭 계산
+# 때 한 글자를 2칸으로 센다(그래야 한글 위주 칸과 숫자 위주 칸의 비율이
+# 실제 보이는 폭 비율과 비슷해진다).
+_WIDE_CHAR_RANGES = (
+    (0x1100, 0x11FF),  # 한글 자모
+    (0x3130, 0x318F),  # 한글 호환 자모
+    (0xAC00, 0xD7A3),  # 한글 음절
+    (0x3040, 0x30FF),  # 가나(히라가나/가타카나)
+    (0x4E00, 0x9FFF),  # 한자
+    (0xFF00, 0xFFEF),  # 전각 기호/문자
+)
+
+
+def _is_wide_char(ch: str) -> bool:
+    code = ord(ch)
+    return any(start <= code <= end for start, end in _WIDE_CHAR_RANGES)
+
+
+def _visual_text_width(text: str) -> int:
+    return sum(2 if _is_wide_char(ch) else 1 for ch in text)
+
+
+def _apply_content_based_column_widths(
+    table, placements: List[Tuple[int, int, int, int, etree._Element]], col_count: int
+) -> None:
+    """칸 안 글자 양에 비례해서 각 열의 폭을 미리 계산해 지정한다 - 지금까지는
+    python-docx가 만드는 기본값(모든 열이 똑같은 폭)을 그대로 뒀는데, 실제
+    표는 열마다 내용 길이가 크게 달라서 요청이 들어왔다(사용자: "내용에
+    따라 동적으로 조절이 가능할까?"). colspan으로 합쳐진 칸은 "한 열의
+    폭"이 뭘 뜻하는지 애매해서 폭 계산에서는 건너뛴다 - 합쳐지지 않은 다른
+    행의 같은 열 내용으로도 충분히 가늠할 수 있다.
+
+    table.autofit=False로 바꿔 워드가 자체적으로 다시 계산하지 않고 우리가
+    지정한 폭을 그대로 쓰게 한다(열려서 바로 보일 모양을 우리가 보장)."""
+    weights = [0] * col_count
+    for _row_index, col_index, _rowspan, colspan, cell in placements:
+        if colspan != 1 or col_index >= col_count:
+            continue
+        text = "".join(cell.itertext())
+        weights[col_index] = max(weights[col_index], _visual_text_width(text))
+
+    weights = [max(w, _TABLE_MIN_COLUMN_WEIGHT) for w in weights]
+    total_weight = sum(weights)
+    if total_weight <= 0:
+        return
+
+    table.autofit = False
+    for index, column in enumerate(table.columns):
+        column.width = Mm(_TABLE_USABLE_WIDTH_MM * weights[index] / total_weight)
+
+
 def _render_table(document: DocxDocument, table_element: etree._Element) -> None:
     rows: List[etree._Element] = []
     for section in table_element:
@@ -1433,6 +1534,7 @@ def _render_table(document: DocxDocument, table_element: etree._Element) -> None
         table.style = "Table Grid"
     except KeyError:
         pass
+    _apply_content_based_column_widths(table, placements, col_count)
 
     for row_index, col_index, rowspan, colspan, cell in placements:
         end_row = min(row_index + rowspan, row_count) - 1

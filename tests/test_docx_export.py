@@ -479,8 +479,9 @@ class RenderedDocxContentTest(unittest.TestCase):
         return data
 
     def test_title_becomes_first_heading(self):
+        # 제목 글자 앞뒤에 공백이 하나씩 붙는다(밑줄이 조금 더 길어 보이게).
         data = self._convert("<p>본문</p>", title="회의록")
-        self.assertIn("회의록", _docx_paragraph_texts(data))
+        self.assertIn(" 회의록 ", _docx_paragraph_texts(data))
 
     def test_headings_and_paragraph_are_preserved(self):
         # 구조적 변환(제목 접어넣기)으로 h2는 1단계 항목이 되어 들여쓰기가
@@ -909,8 +910,9 @@ class LinkedPagesExpansionTest(unittest.TestCase):
             data, _ = convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
 
         texts = _docx_paragraph_texts(data)
-        self.assertIn("안건1", texts)  # "(첨부 1)" 접두어가 제거된 제목
-        self.assertNotIn("(첨부 1) 안건1", texts)
+        # "(첨부 1)" 접두어가 제거된 제목(쪽 제목이라 앞뒤에 공백이 하나씩 붙음).
+        self.assertIn(" 안건1 ", texts)
+        self.assertNotIn(" (첨부 1) 안건1 ", texts)
         self.assertIn("첨부 내용입니다.", texts)
 
     def test_include_macro_wrapped_in_lone_p_still_renders_table_and_line_breaks(self):
@@ -1032,9 +1034,10 @@ class LinkedPagesExpansionTest(unittest.TestCase):
             data, _ = convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
 
         texts = _docx_paragraph_texts(data)
-        self.assertIn("안건A", texts)
+        # 쪽 제목이라 앞뒤에 공백이 하나씩 붙음.
+        self.assertIn(" 안건A ", texts)
         self.assertIn("A 내용", texts)
-        self.assertIn("안건B", texts)
+        self.assertIn(" 안건B ", texts)
         self.assertIn("B 내용", texts)
 
     def test_include_macro_pointing_back_to_root_page_is_skipped_as_cycle(self):
@@ -1128,6 +1131,27 @@ class DocumentStyleConfigurationTest(unittest.TestCase):
         self.assertTrue(title.font.bold)
         self.assertTrue(title.font.underline)
 
+    def test_title_style_has_no_bottom_border_and_no_theme_font_override(self):
+        # python-docx 기본 템플릿의 Title 스타일은 (1) 문단 밑에 가로줄
+        # 테두리가 있어서 우리가 지정한 글자 밑줄과 겹쳐 "긴 밑줄"처럼
+        # 보였고, (2) 글꼴을 테마 참조로도 갖고 있어서 우리가 지정한
+        # 맑은 고딕이 무시되고 테마 기본 글꼴로 보였다(사용자 보고 두 건).
+        document = self._convert_document()
+        title_element = document.styles["Title"].element
+        self.assertIsNone(title_element.find(qn("w:pPr") + "/" + qn("w:pBdr")))
+        r_fonts = title_element.find(qn("w:rPr") + "/" + qn("w:rFonts"))
+        self.assertIsNotNone(r_fonts)
+        self.assertIsNone(r_fonts.get(qn("w:asciiTheme")))
+        self.assertIsNone(r_fonts.get(qn("w:eastAsiaTheme")))
+        self.assertEqual(r_fonts.get(qn("w:ascii")), "맑은 고딕")
+        self.assertEqual(r_fonts.get(qn("w:eastAsia")), "맑은 고딕")
+
+    def test_document_title_text_is_padded_with_spaces(self):
+        # 제목 글자 앞뒤에 공백을 하나씩 줘서 글자 밑줄이 조금 더 길어
+        # 보이게 한다(사용자 요청).
+        document = self._convert_document()
+        self.assertEqual(document.paragraphs[0].text, " 회의록 ")
+
     def test_heading_styles_use_profile_sizes(self):
         document = self._convert_document()
         self.assertEqual(document.styles["Heading 1"].font.size, Pt(15))
@@ -1165,6 +1189,47 @@ class DocumentStyleConfigurationTest(unittest.TestCase):
         data_run = table.cell(1, 0).paragraphs[0].runs[0]
         self.assertEqual(data_run.font.size, Pt(10))
         self.assertFalse(data_run.bold)
+
+    def test_table_column_widths_are_proportional_to_content_not_equal(self):
+        # 전에는 python-docx 기본값대로 모든 열이 똑같은 폭이었다 - 열마다
+        # 내용 길이가 크게 다르면 어색해 보인다는 요청으로, 글자 양에
+        # 비례해서 폭을 다르게 준다.
+        storage = (
+            "<table><tbody>"
+            "<tr><th>번호</th><th>담당자 이름 및 소속 부서 설명이 긴 칸</th><th>비고</th></tr>"
+            "<tr><td>1</td><td>김철수(기획전략팀, 사내 인프라 담당)</td><td>-</td></tr>"
+            "</tbody></table>"
+        )
+        resp = _page_response(storage, title="회의록")
+        with mock.patch("requests.get", return_value=resp):
+            data, _ = convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+        document = DocxDocument(io.BytesIO(data))
+        table = document.tables[0]
+        widths = [col.width for col in table.columns]
+        self.assertFalse(table.autofit)
+        # 가운데 열(내용이 훨씨 길다)이 양쪽보다 뚜렷하게 넓어야 한다.
+        self.assertGreater(widths[1], widths[0] * 2)
+        self.assertGreater(widths[1], widths[2] * 2)
+        # 짧은 열도 거의 0으로 눌리지는 않아야 한다(최소 가중치 바닥값).
+        self.assertGreater(widths[0], Mm(5))
+        self.assertGreater(widths[2], Mm(5))
+
+    def test_table_column_with_rowspan_cell_still_gets_measured_from_other_rows(self):
+        # colspan>1인 칸은 폭 계산에서 건너뛰지만, 그 열의 "다른" 행에 있는
+        # (colspan==1) 칸으로는 여전히 폭을 가늠할 수 있어야 한다.
+        storage = (
+            "<table><tbody>"
+            '<tr><td colspan="2">합쳐진 칸(짧음)</td></tr>'
+            "<tr><td>짧음</td><td>이 열은 내용이 훨씬 더 길게 들어 있는 칸입니다</td></tr>"
+            "</tbody></table>"
+        )
+        resp = _page_response(storage, title="회의록")
+        with mock.patch("requests.get", return_value=resp):
+            data, _ = convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+        document = DocxDocument(io.BytesIO(data))
+        table = document.tables[0]
+        widths = [col.width for col in table.columns]
+        self.assertGreater(widths[1], widths[0] * 2)
 
 
 _PNG_1PX = base64.b64decode(
