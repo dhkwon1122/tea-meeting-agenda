@@ -115,7 +115,7 @@ from urllib.parse import quote
 import requests
 
 from ..builder import (
-    DEFAULT_ATTACHMENT_TEMPLATE_ID,
+    DEFAULT_DETAIL_PAGE_BODY_HTML,
     AgendaItem,
     attachment_page_title,
     build_agenda_page_body,
@@ -607,43 +607,12 @@ def _create_page(
     return resp.json()
 
 
-def _fetch_template_body(base_url: str, token: str, template_id: str) -> str:
-    """"템플릿에서 페이지 만들기" 버튼이 쓰던 템플릿의 본문(storage format)을
-    가져온다. Confluence Content Template API(/rest/api/template/{id})를
-    먼저 시도하고, 거기서 본문을 못 가져오면 templateId가 실은 일반 페이지
-    ID인 경우를 대비해 /rest/api/content/{id}로 한 번 더 시도한다 - 사내
-    create-from-template 매크로가 templateId와 templateName에 같은 값을
-    쓰는 걸 보면, 이 값이 표준 Content Template이 아니라 그냥 "본문을 복사해 올
-    페이지" ID일 가능성이 있다."""
-    try:
-        resp = requests.get(
-            f"{base_url}/rest/api/template/{template_id}",
-            headers=_request_headers(token),
-            timeout=30,
-            verify=_ssl_verify(),
-            proxies=_proxies(),
-        )
-    except (requests.RequestException, OSError) as exc:
-        raise _wrap_connection_error(exc) from exc
-    if resp.status_code == 200:
-        body = (resp.json().get("body") or {}).get("storage", {}).get("value")
-        if body:
-            return body
-
-    page = _fetch_page(base_url, template_id, token)
-    body = (page.get("body") or {}).get("storage", {}).get("value")
-    if not body:
-        raise RuntimeError(f"템플릿 {template_id}에서 본문을 가져올 수 없습니다.")
-    return body
-
-
 def create_agenda_page(
     parent_url: str,
     title: str,
     items: List[AgendaItem],
     *,
     token: Optional[str] = None,
-    template_id: str = DEFAULT_ATTACHMENT_TEMPLATE_ID,
     intro: Optional[str] = None,
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> dict:
@@ -651,6 +620,11 @@ def create_agenda_page(
     새 안건 페이지의 하위 페이지로 한 번에 자동 생성한다 - 지금까지는 상세
     페이지를 "템플릿에서 페이지 만들기" 버튼으로 안건 수만큼 손으로 하나씩
     눌러 만들어야 했다(builder.attachment_setup_section_html).
+
+    상세 페이지 본문은 builder.DEFAULT_DETAIL_PAGE_BODY_HTML(고정 문구)를
+    그대로 쓴다 - 실제 Confluence 템플릿을 API로 가져오는 방법은
+    엔드포인트가 불확실해서 위험한데, 팀에서 쓰는 형식 자체가 단순해서
+    고정 문구로 충분하다(사용자 확인).
 
     상세 페이지 하나가 실패해도(예: 같은 제목이 이미 있음) 나머지는 계속
     만든다 - 안건 페이지 자체는 이미 만들어졌는데 상세 페이지 하나 실패로
@@ -700,13 +674,6 @@ def create_agenda_page(
     )
     agenda_page_id = agenda_page["id"]
 
-    say("상세 페이지 템플릿 불러오는 중...")
-    try:
-        template_body = _fetch_template_body(base_url, effective_token, template_id)
-    except Exception as exc:  # noqa: BLE001 - 템플릿을 못 가져와도 안건 페이지는 이미 만들어졌다
-        say(f"템플릿을 가져오지 못해 빈 본문으로 대신합니다: {exc}")
-        template_body = ""
-
     detail_pages: List[dict] = []
     for idx, item in enumerate(items, start=1):
         detail_title = attachment_page_title(idx, item.title)
@@ -718,7 +685,7 @@ def create_agenda_page(
                 space_key=space_key,
                 parent_id=agenda_page_id,
                 title=detail_title,
-                body_storage=template_body,
+                body_storage=DEFAULT_DETAIL_PAGE_BODY_HTML,
             )
             detail_pages.append(
                 {"title": detail_title, "ok": True, "url": _page_browser_url(base_url, detail_page)}

@@ -504,13 +504,10 @@ class CreateAgendaPageTest(unittest.TestCase):
 
     def test_creates_agenda_page_and_detail_pages_as_its_children(self):
         items = [AgendaItem(title="예산안 승인"), AgendaItem(title="채용 계획")]
-        template_id = docx_export.DEFAULT_ATTACHMENT_TEMPLATE_ID
 
         def fake_get(url, **kwargs):
             if url.endswith("/rest/api/content/100"):
                 return _fake_response(json_data={"id": "100", "space": {"key": "TEAM"}})
-            if url.endswith(f"/rest/api/template/{template_id}"):
-                return _fake_response(json_data={"body": {"storage": {"value": "<p>템플릿 본문</p>"}}})
             raise AssertionError(f"unexpected GET: {url}")
 
         created_titles: list = []
@@ -565,7 +562,9 @@ class CreateAgendaPageTest(unittest.TestCase):
         self.assertEqual(detail_payload_1["space"], {"key": "TEAM"})
         # 상세 페이지는 상위 페이지가 아니라 "새로 만든 안건 페이지"의 하위여야 한다.
         self.assertEqual(detail_payload_1["ancestors"], [{"id": "200"}])
-        self.assertEqual(detail_payload_1["body"]["storage"]["value"], "<p>템플릿 본문</p>")
+        self.assertEqual(
+            detail_payload_1["body"]["storage"]["value"], docx_export.DEFAULT_DETAIL_PAGE_BODY_HTML
+        )
 
         self.assertEqual(result["page_id"], "200")
         self.assertEqual(result["url"], "https://wiki.example.com/pages/viewpage.action?pageId=200")
@@ -578,52 +577,12 @@ class CreateAgendaPageTest(unittest.TestCase):
         )
         self.assertTrue(progress)
 
-    def test_template_fetch_falls_back_to_content_api_when_template_endpoint_missing(self):
-        # 사내 create-from-template 매크로가 templateId/templateName에 같은 값을
-        # 쓰는 걸 보면, 그 값이 표준 Content Template이 아니라 그냥 일반 페이지
-        # ID일 수 있다 - /rest/api/template/{id}가 없으면(404) 그 ID를 페이지로
-        # 보고 본문을 가져와야 한다.
-        items = [AgendaItem(title="안건1")]
-        template_id = docx_export.DEFAULT_ATTACHMENT_TEMPLATE_ID
-
-        def fake_get(url, **kwargs):
-            if url.endswith("/rest/api/content/100"):
-                return _fake_response(json_data={"id": "100", "space": {"key": "TEAM"}})
-            if url.endswith(f"/rest/api/template/{template_id}"):
-                return _fake_response(status_code=404)
-            if url.endswith(f"/rest/api/content/{template_id}"):
-                return _fake_response(
-                    json_data={"body": {"storage": {"value": "<p>페이지를 템플릿으로</p>"}}}
-                )
-            raise AssertionError(f"unexpected GET: {url}")
-
-        def fake_post(url, **kwargs):
-            payload = kwargs["json"]
-            if payload["title"] == "회의록":
-                return _fake_response(
-                    json_data={"id": "200", "title": "회의록", "_links": {"webui": "/x/200"}}
-                )
-            return _fake_response(
-                json_data={"id": "300", "title": payload["title"], "_links": {"webui": "/x/300"}}
-            )
-
-        with mock.patch("requests.get", side_effect=fake_get), mock.patch(
-            "requests.post", side_effect=fake_post
-        ) as mocked_post:
-            create_agenda_page("https://wiki.example.com/pages/100", "회의록", items)
-
-        detail_payload = mocked_post.call_args_list[1].kwargs["json"]
-        self.assertEqual(detail_payload["body"]["storage"]["value"], "<p>페이지를 템플릿으로</p>")
-
     def test_one_failed_detail_page_does_not_block_the_others_or_the_agenda_page(self):
         items = [AgendaItem(title="안건1"), AgendaItem(title="안건2")]
-        template_id = docx_export.DEFAULT_ATTACHMENT_TEMPLATE_ID
 
         def fake_get(url, **kwargs):
             if url.endswith("/rest/api/content/100"):
                 return _fake_response(json_data={"id": "100", "space": {"key": "TEAM"}})
-            if url.endswith(f"/rest/api/template/{template_id}"):
-                return _fake_response(json_data={"body": {"storage": {"value": "<p>본문</p>"}}})
             raise AssertionError(f"unexpected GET: {url}")
 
         def fake_post(url, **kwargs):

@@ -146,6 +146,22 @@ def attachment_page_title(index: int, title: str) -> str:
     return f"(첨부 {index}) {title}"
 
 
+# API로 자동 생성되는 상세 페이지(docx_export.create_agenda_page)의 본문 -
+# 실제 Confluence 템플릿을 API로 가져오는 방법은 엔드포인트가 불확실해서
+# (표준 Content Template API인지, 그냥 일반 페이지인지조차 사내 환경마다
+# 다를 수 있음) 위험했는데, 팀에서 쓰는 형식 자체가 단순해서 고정 문구로
+# 대신한다(사용자 확인: "템플릿에 별다른 내용은 없어. 아래 내용 정도면
+# 돼").
+DEFAULT_DETAIL_PAGE_BODY_HTML = (
+    "<h3>□ 가나다라마바사</h3>"
+    "<p>&nbsp;&nbsp;- 가나다라마바사</p>"
+    "<p>&nbsp;&nbsp;- 가나다라마바사</p>"
+    "<p><br/></p>"
+    "<p><strong>【 표/그림 또는 특정 안건 개요 제목 】</strong></p>"
+    "<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;· 가나다라마바사</p>"
+)
+
+
 def create_from_template_button(template_id: str, button_label: str) -> str:
     """컨플루언스 '템플릿에서 페이지 만들기' 버튼 매크로.
 
