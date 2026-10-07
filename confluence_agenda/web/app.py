@@ -217,6 +217,64 @@ _APP_STYLE = """
   .nav-link:hover { background: var(--blue-tint); border-color: var(--blue); }
   .back-link { font-size: 0.85rem; color: var(--blue); text-decoration: none; }
   .back-link:hover { text-decoration: underline; }
+
+  .choice-grid { display: flex; gap: 16px; flex-wrap: wrap; }
+  .choice-card {
+    flex: 1 1 240px; display: flex; flex-direction: column; gap: 8px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 28px 24px; text-decoration: none; color: var(--text); transition: all .15s;
+  }
+  .choice-card:hover {
+    border-color: var(--blue); box-shadow: 0 2px 10px rgba(26, 115, 232, 0.12);
+    transform: translateY(-1px);
+  }
+  .choice-icon { font-size: 2rem; }
+  .choice-title { font-size: 1.05rem; font-weight: 600; }
+  .choice-desc { font-size: 0.85rem; color: var(--text-muted); }
+"""
+
+HOME_PAGE_TEMPLATE = """
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Confluence 안건 도우미</title>
+<style>""" + _APP_STYLE + """</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <div class="header-row">
+      <div>
+        <h1>Confluence 안건 도우미</h1>
+        <p class="subtitle">원하는 기능을 선택하세요.</p>
+      </div>
+      {% if current_user %}
+      <div class="user-info">{{ current_user.display_name }}님<a href="/logout">로그아웃</a></div>
+      {% endif %}
+    </div>
+  </header>
+
+  <div class="choice-grid">
+    <a class="choice-card" href="/agenda">
+      <div class="choice-icon">📝</div>
+      <div class="choice-title">안건 페이지 생성</div>
+      <div class="choice-desc">
+        안건 제목을 입력해 Confluence 안건 보고 소스를 만들고, 바로 메일로 보냅니다.
+      </div>
+    </a>
+    {% if docx_export_configured %}
+    <a class="choice-card" href="/confluence-to-docx">
+      <div class="choice-icon">📄</div>
+      <div class="choice-title">워드 파일 변환</div>
+      <div class="choice-desc">Confluence 페이지 URL을 Word(.docx) 파일로 변환합니다.</div>
+    </a>
+    {% endif %}
+  </div>
+</div>
+</body>
+</html>
 """
 
 PAGE_TEMPLATE = """
@@ -238,6 +296,7 @@ PAGE_TEMPLATE = """
           안건 제목을 한 줄씩 입력하세요(대략 10개 내외 권장). 이미 써둔 본문이
           있으면 제목 아래 줄에 이어서 적고, 다음 안건과는 빈 줄로 구분하세요
           — 본문을 안 쓴 안건은 기존처럼 자리표시자로 채워집니다.
+          <a class="back-link" href="/">← 메인으로 돌아가기</a>
         </p>
       </div>
       {% if current_user %}
@@ -245,12 +304,6 @@ PAGE_TEMPLATE = """
       {% endif %}
     </div>
   </header>
-
-  {% if docx_export_configured %}
-  <div class="nav-row">
-    <a class="nav-link" href="/confluence-to-docx">📄 컨플루언스 → Word 변환기 열기</a>
-  </div>
-  {% endif %}
 
   {% if message %}
     <div class="message {{ 'ok' if message_ok else 'error' }}">{{ message }}</div>
@@ -353,7 +406,7 @@ CONFLUENCE_DOCX_PAGE_TEMPLATE = """
         <h1>Confluence → Word 변환기</h1>
         <p class="subtitle">
           컨플루언스 페이지 URL을 넣으면 .docx로 변환해 바로 받습니다.
-          <a class="back-link" href="/">← 안건 보고 소스 생성기로 돌아가기</a>
+          <a class="back-link" href="/">← 메인으로 돌아가기</a>
         </p>
       </div>
       {% if current_user %}
@@ -544,8 +597,17 @@ def _parse_extra_emails(raw: str) -> List[str]:
     return [part.strip() for chunk in raw.splitlines() for part in chunk.split(",") if part.strip()]
 
 
-@app.route("/", methods=["GET", "POST"])
-def index():
+@app.route("/", methods=["GET"])
+def home():
+    return render_template_string(
+        HOME_PAGE_TEMPLATE,
+        current_user=auth.get_current_user(),
+        docx_export_configured=docx_export_configured(),
+    )
+
+
+@app.route("/agenda", methods=["GET", "POST"])
+def agenda_page():
     # 매 요청마다 새로 읽어서, 서버 재시작 없이 contacts.json 수정이 바로 반영되게 한다.
     preset_contacts = load_preset_contacts()
     preset_email_to_name = {email: name for name, email in preset_contacts}
@@ -616,7 +678,6 @@ def index():
         message_ok=message_ok,
         mail_configured=is_mail_configured(),
         current_user=auth.get_current_user(),
-        docx_export_configured=docx_export_configured(),
     )
 
 

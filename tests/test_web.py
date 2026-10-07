@@ -29,18 +29,18 @@ class WebAppTest(unittest.TestCase):
         self._contacts_env = {"CONTACTS_FILE": str(contacts_path)}
 
     def test_get_index_renders_form(self):
-        resp = self.client.get("/")
+        resp = self.client.get("/agenda")
         self.assertEqual(resp.status_code, 200)
         self.assertIn(b'name="titles"', resp.data)
 
     def test_post_without_titles_shows_error(self):
-        resp = self.client.post("/", data={"titles": "\n\n", "action": "generate"})
+        resp = self.client.post("/agenda", data={"titles": "\n\n", "action": "generate"})
         self.assertEqual(resp.status_code, 200)
         self.assertIn("안건 제목을 한 줄에 하나씩 입력해주세요".encode(), resp.data)
 
     def test_post_generates_source_for_multiple_blank_line_separated_titles(self):
         resp = self.client.post(
-            "/", data={"titles": "예산안 승인\n\n채용 계획\n", "action": "generate"}
+            "/agenda", data={"titles": "예산안 승인\n\n채용 계획\n", "action": "generate"}
         )
         self.assertEqual(resp.status_code, 200)
         body = resp.data.decode("utf-8")
@@ -53,7 +53,7 @@ class WebAppTest(unittest.TestCase):
         # 제목만 입력했다 - 전자는 그 내용이 그대로 들어가고, 후자만 여전히
         # 자리표시자로 채워져야 한다.
         resp = self.client.post(
-            "/",
+            "/agenda",
             data={
                 "titles": "예산안 승인\n부서별 예산안을 검토하고 승인합니다.\n\n채용 계획",
                 "action": "generate",
@@ -65,7 +65,7 @@ class WebAppTest(unittest.TestCase):
 
     def test_post_shows_macro_connection_diagram(self):
         resp = self.client.post(
-            "/", data={"titles": "예산안 승인\n\n채용 계획", "action": "generate"}
+            "/agenda", data={"titles": "예산안 승인\n\n채용 계획", "action": "generate"}
         )
         body = resp.data.decode("utf-8")
         self.assertIn("매크로 연결 구조", body)
@@ -84,7 +84,7 @@ class WebAppTest(unittest.TestCase):
             "CONTACTS_FILE": str(missing_path),
         }
         with mock.patch.dict("os.environ", env, clear=True):
-            resp = self.client.get("/")
+            resp = self.client.get("/agenda")
         self.assertNotIn(b'name="preset_to"', resp.data)
 
     def test_mail_configured_with_contacts_file_shows_preset_chips(self):
@@ -95,7 +95,7 @@ class WebAppTest(unittest.TestCase):
             **self._contacts_env,
         }
         with mock.patch.dict("os.environ", env, clear=True):
-            resp = self.client.get("/")
+            resp = self.client.get("/agenda")
         body = resp.data.decode("utf-8")
         self.assertIn("테스트유저1", body)
         self.assertIn("테스트유저2", body)
@@ -104,7 +104,7 @@ class WebAppTest(unittest.TestCase):
     def test_send_mail_without_config_shows_error(self):
         with mock.patch.dict("os.environ", {}, clear=True):
             resp = self.client.post(
-                "/",
+                "/agenda",
                 data={
                     "titles": "예산안 승인",
                     "action": "send_mail",
@@ -117,7 +117,7 @@ class WebAppTest(unittest.TestCase):
         env = {"MAIL_API_TOKEN": "t", "MAIL_API_SYSTEM_ID": "s", "MAIL_API_USER_ID": "u"}
         with mock.patch.dict("os.environ", env, clear=True):
             resp = self.client.post(
-                "/", data={"titles": "예산안 승인", "action": "send_mail", "extra_to": ""}
+                "/agenda", data={"titles": "예산안 승인", "action": "send_mail", "extra_to": ""}
             )
         self.assertIn("받는 사람을 한 명 이상 선택하거나 입력해주세요".encode(), resp.data)
 
@@ -127,7 +127,7 @@ class WebAppTest(unittest.TestCase):
             "confluence_agenda.web.app.send_report_email"
         ) as fake_send:
             resp = self.client.post(
-                "/",
+                "/agenda",
                 data={
                     "titles": "예산안 승인\n\n채용 계획",
                     "action": "send_mail",
@@ -152,7 +152,7 @@ class WebAppTest(unittest.TestCase):
             "confluence_agenda.web.app.send_report_email"
         ) as fake_send:
             resp = self.client.post(
-                "/",
+                "/agenda",
                 data={
                     "titles": "예산안 승인",
                     "action": "send_mail",
@@ -168,7 +168,7 @@ class WebAppTest(unittest.TestCase):
     def test_get_index_prefills_fixed_default_subject(self):
         env = {"MAIL_API_TOKEN": "t", "MAIL_API_SYSTEM_ID": "s", "MAIL_API_USER_ID": "u"}
         with mock.patch.dict("os.environ", env, clear=True):
-            resp = self.client.get("/")
+            resp = self.client.get("/agenda")
         self.assertIn(f'value="{build_email_subject()}"'.encode(), resp.data)
 
     def test_send_mail_to_preset_chips_and_extra_address_combined(self):
@@ -182,7 +182,7 @@ class WebAppTest(unittest.TestCase):
             "confluence_agenda.web.app.send_report_email"
         ) as fake_send:
             resp = self.client.post(
-                "/",
+                "/agenda",
                 data={
                     "titles": "예산안 승인",
                     "action": "send_mail",
@@ -614,6 +614,13 @@ class ConfluenceDocxAndPatTest(unittest.TestCase):
             resp = self.client.get("/")
 
         self.assertNotIn(b'href="/confluence-to-docx"', resp.data)
+
+    def test_home_page_always_shows_agenda_choice_link(self):
+        # 워드 변환 기능이 꺼져 있어도 안건 페이지 생성 선택지는 항상 보여야 한다.
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=False):
+            resp = self.client.get("/")
+
+        self.assertIn(b'href="/agenda"', resp.data)
 
 
 class MainStartupGuardTest(unittest.TestCase):
