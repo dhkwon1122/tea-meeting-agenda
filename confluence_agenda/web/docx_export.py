@@ -114,6 +114,12 @@ from urllib.parse import quote
 
 import requests
 
+from ..builder import (
+    DEFAULT_ATTACHMENT_TEMPLATE_ID,
+    AgendaItem,
+    attachment_page_title,
+    build_agenda_page_body,
+)
 from . import confluence_credentials
 
 try:
@@ -561,6 +567,172 @@ def _fetch_child_pages(base_url: str, token: str, page_id: str) -> List[dict]:
     if resp.status_code != 200:
         return []
     return resp.json().get("results") or []
+
+
+def _page_browser_url(base_url: str, page: dict) -> str:
+    """페이지 생성 응답(_links.webui, 사이트 루트 기준 상대경로)으로 바로
+    열어볼 수 있는 주소를 만든다 - _links.webui가 없으면(이론상 거의 없지만)
+    pageId 기반 옛 주소 형태로 대신한다."""
+    webui = (page.get("_links") or {}).get("webui")
+    if webui:
+        return f"{base_url}{webui}"
+    return f"{base_url}/pages/viewpage.action?pageId={page.get('id')}"
+
+
+def _create_page(
+    base_url: str, token: str, *, space_key: str, parent_id: str, title: str, body_storage: str
+) -> dict:
+    """새 페이지를 만든다(POST /rest/api/content) - ancestors에 parent_id를
+    넣으면 그 페이지의 하위 페이지로 만들어진다."""
+    payload = {
+        "type": "page",
+        "title": title,
+        "space": {"key": space_key},
+        "ancestors": [{"id": parent_id}],
+        "body": {"storage": {"value": body_storage, "representation": "storage"}},
+    }
+    try:
+        resp = requests.post(
+            f"{base_url}/rest/api/content",
+            json=payload,
+            headers=_request_headers(token),
+            timeout=30,
+            verify=_ssl_verify(),
+            proxies=_proxies(),
+        )
+    except (requests.RequestException, OSError) as exc:
+        raise _wrap_connection_error(exc) from exc
+    if resp.status_code not in (200, 201):
+        raise RuntimeError(f"'{title}' 페이지 생성 실패(HTTP {resp.status_code}): {resp.text[:300]}")
+    return resp.json()
+
+
+def _fetch_template_body(base_url: str, token: str, template_id: str) -> str:
+    """"템플릿에서 페이지 만들기" 버튼이 쓰던 템플릿의 본문(storage format)을
+    가져온다. Confluence Content Template API(/rest/api/template/{id})를
+    먼저 시도하고, 거기서 본문을 못 가져오면 templateId가 실은 일반 페이지
+    ID인 경우를 대비해 /rest/api/content/{id}로 한 번 더 시도한다 - 사내
+    create-from-template 매크로가 templateId와 templateName에 같은 값을
+    쓰는 걸 보면, 이 값이 표준 Content Template이 아니라 그냥 "본문을 복사해 올
+    페이지" ID일 가능성이 있다."""
+    try:
+        resp = requests.get(
+            f"{base_url}/rest/api/template/{template_id}",
+            headers=_request_headers(token),
+            timeout=30,
+            verify=_ssl_verify(),
+            proxies=_proxies(),
+        )
+    except (requests.RequestException, OSError) as exc:
+        raise _wrap_connection_error(exc) from exc
+    if resp.status_code == 200:
+        body = (resp.json().get("body") or {}).get("storage", {}).get("value")
+        if body:
+            return body
+
+    page = _fetch_page(base_url, template_id, token)
+    body = (page.get("body") or {}).get("storage", {}).get("value")
+    if not body:
+        raise RuntimeError(f"템플릿 {template_id}에서 본문을 가져올 수 없습니다.")
+    return body
+
+
+def create_agenda_page(
+    parent_url: str,
+    title: str,
+    items: List[AgendaItem],
+    *,
+    token: Optional[str] = None,
+    template_id: str = DEFAULT_ATTACHMENT_TEMPLATE_ID,
+    intro: Optional[str] = None,
+    on_progress: Optional[Callable[[str], None]] = None,
+) -> dict:
+    """안건 페이지를 parent_url 하위에 실제로 만들고, 안건별 상세 페이지도
+    새 안건 페이지의 하위 페이지로 한 번에 자동 생성한다 - 지금까지는 상세
+    페이지를 "템플릿에서 페이지 만들기" 버튼으로 안건 수만큼 손으로 하나씩
+    눌러 만들어야 했다(builder.attachment_setup_section_html).
+
+    상세 페이지 하나가 실패해도(예: 같은 제목이 이미 있음) 나머지는 계속
+    만든다 - 안건 페이지 자체는 이미 만들어졌는데 상세 페이지 하나 실패로
+    전체가 롤백되면 사용자가 더 혼란스럽다. 어떤 안건이 실패했는지, 왜
+    실패했는지는 반환값의 detail_pages에 그대로 담겨서 화면에 보여줄 수
+    있다.
+    """
+    say = on_progress or (lambda message: None)
+
+    if not is_url_configured():
+        raise DocxExportUnavailable(
+            "CONFLUENCE_URL 환경변수가 설정되지 않았습니다. .env.example을 참고해 설정해주세요."
+        )
+    effective_token = token or os.environ.get("CONFLUENCE_API_TOKEN", "").strip()
+    if not effective_token:
+        raise DocxExportUnavailable(
+            "Confluence 개인 액세스 토큰(PAT)이 없습니다. 화면에서 내 PAT을 등록하거나, "
+            "관리자가 CONFLUENCE_API_TOKEN 환경변수를 설정해야 합니다."
+        )
+    if not items:
+        raise ValueError("최소 1개 이상의 안건이 필요합니다.")
+
+    parent_id = _page_id_from_url(parent_url)
+    if parent_id is None:
+        raise RuntimeError(
+            f"상위 페이지 URL에서 페이지 ID를 못 찾았습니다: {parent_url}\n"
+            "'/pages/123456', '?pageId=123456' 형태이거나 페이지 ID 숫자 자체여야 합니다."
+        )
+
+    base_url = _normalize_base_url(os.environ.get("CONFLUENCE_URL", "").strip())
+
+    say("상위 페이지 확인 중...")
+    parent_page = _fetch_page(base_url, parent_id, effective_token)
+    space_key = (parent_page.get("space") or {}).get("key")
+    if not space_key:
+        raise RuntimeError(f"상위 페이지 {parent_id}의 스페이스를 확인할 수 없습니다.")
+
+    say("안건 페이지 생성 중...")
+    body = build_agenda_page_body(items, intro=intro, include_setup_section=False)
+    agenda_page = _create_page(
+        base_url,
+        effective_token,
+        space_key=space_key,
+        parent_id=parent_id,
+        title=title,
+        body_storage=body,
+    )
+    agenda_page_id = agenda_page["id"]
+
+    say("상세 페이지 템플릿 불러오는 중...")
+    try:
+        template_body = _fetch_template_body(base_url, effective_token, template_id)
+    except Exception as exc:  # noqa: BLE001 - 템플릿을 못 가져와도 안건 페이지는 이미 만들어졌다
+        say(f"템플릿을 가져오지 못해 빈 본문으로 대신합니다: {exc}")
+        template_body = ""
+
+    detail_pages: List[dict] = []
+    for idx, item in enumerate(items, start=1):
+        detail_title = attachment_page_title(idx, item.title)
+        say(f"상세 페이지 생성 중... ({idx}/{len(items)}) {detail_title}")
+        try:
+            detail_page = _create_page(
+                base_url,
+                effective_token,
+                space_key=space_key,
+                parent_id=agenda_page_id,
+                title=detail_title,
+                body_storage=template_body,
+            )
+            detail_pages.append(
+                {"title": detail_title, "ok": True, "url": _page_browser_url(base_url, detail_page)}
+            )
+        except Exception as exc:  # noqa: BLE001 - 하나 실패해도 나머지는 계속 만든다
+            detail_pages.append({"title": detail_title, "ok": False, "error": str(exc)})
+
+    say("완료")
+    return {
+        "page_id": agenda_page_id,
+        "url": _page_browser_url(base_url, agenda_page),
+        "title": agenda_page.get("title", title),
+        "detail_pages": detail_pages,
+    }
 
 
 def _fetch_page_attachments(base_url: str, token: str, page_id: str) -> Tuple[dict, Optional[str]]:

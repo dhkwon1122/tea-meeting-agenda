@@ -277,17 +277,26 @@ def build_agenda_page_body(
     intro: Optional[TextInput] = None,
     template_id: str = DEFAULT_ATTACHMENT_TEMPLATE_ID,
     button_label: str = DEFAULT_ATTACHMENT_BUTTON_LABEL,
+    include_setup_section: bool = True,
 ) -> str:
     """안건 목록을 받아 컨플루언스 에디터에 그대로 붙여넣을 storage-format 소스를 만든다.
 
     맨 위 섹션에는 include 매크로들이 참조할 하위 페이지를 실제로 만들 때
     쓰는 "템플릿에서 페이지 만들기" 버튼 + 만들어야 할 제목 목록을 넣는다.
     하위 페이지를 다 만든 뒤에는 이 섹션만 지우고 발행하면 된다.
+
+    include_setup_section=False면 이 버튼 섹션을 아예 안 넣는다 - API로
+    상세 페이지까지 자동으로 만드는 경로(docx_export.create_agenda_page)는
+    버튼을 누를 필요가 없으므로 이 섹션이 필요 없다.
     """
     if not items:
         raise ValueError("최소 1개 이상의 안건이 필요합니다.")
 
-    sections: List[str] = [attachment_setup_section_html(items, template_id, button_label)]
+    sections: List[str] = (
+        [attachment_setup_section_html(items, template_id, button_label)]
+        if include_setup_section
+        else []
+    )
 
     if intro:
         sections.append(layout_section(_paragraphs_html(intro)))

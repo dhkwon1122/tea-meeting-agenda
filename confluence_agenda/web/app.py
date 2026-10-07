@@ -33,7 +33,7 @@ from ..mailer import MailConfigError, is_mail_configured, send_report_email
 from . import auth, confluence_credentials
 from .contacts import load_preset_contacts
 from .diagram import build_macro_diagram_html
-from .docx_export import DocxExportUnavailable, convert_confluence_url_to_docx
+from .docx_export import DocxExportUnavailable, convert_confluence_url_to_docx, create_agenda_page
 from .docx_export import diagnose_connection as diagnose_confluence_connection
 from .docx_export import docx_bytes_to_preview_html
 from .docx_export import is_feature_available as docx_export_configured
@@ -345,13 +345,59 @@ PAGE_TEMPLATE = """
     </div>
     {% endif %}
 
+    {% if docx_export_configured %}
+    <div class="card">
+      <h2>Confluence에 자동 생성</h2>
+      <p class="subtitle" style="margin:0 0 16px;">
+        위 안건으로 새 안건 페이지를 만들고, 안건별 상세 페이지도 그 하위
+        페이지로 한 번에 만듭니다 - "템플릿에서 페이지 만들기" 버튼을 안건
+        수만큼 손으로 누를 필요가 없어집니다.
+      </p>
+      <div class="field">
+        <label for="parent_url">상위 페이지 URL</label>
+        <input type="text" id="parent_url" name="parent_url" value="{{ parent_url }}"
+               placeholder="https://wiki.사내주소/pages/viewpage.action?pageId=123456">
+      </div>
+      <div class="field">
+        <label for="page_title">새 안건 페이지 제목</label>
+        <input type="text" id="page_title" name="page_title" value="{{ page_title }}"
+               placeholder="9.21(월) 스탭팀장 미팅 피플팀 안건">
+      </div>
+    </div>
+    {% endif %}
+
     <div class="actions">
       <button class="primary" type="submit" name="action" value="generate">소스 생성</button>
       {% if mail_configured %}
       <button class="secondary" type="submit" name="action" value="send_mail">메일로 보내기</button>
       {% endif %}
+      {% if docx_export_configured %}
+      <button class="secondary" type="submit" name="action" value="publish_confluence">Confluence에 자동 생성</button>
+      {% endif %}
     </div>
   </form>
+
+  {% if publish_result %}
+  <div class="card">
+    <h2>생성 결과</h2>
+    <p>
+      <a class="btn-primary" href="{{ publish_result.url }}" target="_blank">
+        {{ publish_result.title }} 열기
+      </a>
+    </p>
+    <ul>
+      {% for detail in publish_result.detail_pages %}
+      <li>
+        {% if detail.ok %}
+          ✅ <a href="{{ detail.url }}" target="_blank">{{ detail.title }}</a>
+        {% else %}
+          ❌ {{ detail.title }} - {{ detail.error }}
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
 
   {% if output %}
   <div class="card">
@@ -624,8 +670,11 @@ def agenda_page():
     selected_presets: List[str] = []
     extra_to = ""
     subject = default_subject
+    parent_url = ""
+    page_title = ""
     output: Optional[str] = None
     diagram_html: Optional[str] = None
+    publish_result: Optional[dict] = None
     message: Optional[str] = None
     message_ok = True
 
@@ -634,14 +683,20 @@ def agenda_page():
         selected_presets = request.form.getlist("preset_to")
         extra_to = request.form.get("extra_to", "")
         subject = request.form.get("subject", "").strip() or default_subject
+        parent_url = request.form.get("parent_url", "").strip()
+        page_title = request.form.get("page_title", "").strip()
         action = request.form.get("action")
 
         items = parse_agenda_input(titles_text)
         if not items:
             message, message_ok = "안건 제목을 한 줄에 하나씩 입력해주세요.", False
         else:
-            output = build_agenda_page_body(items)
-            diagram_html = build_macro_diagram_html(items)
+            # publish_confluence는 API로 직접 만들어서, 손으로 붙여넣을 소스/버튼
+            # 안내가 필요 없다 - 오히려 "이미 만든 페이지를 또 손으로 만들라"는
+            # 것처럼 보여 혼란스럽다.
+            if action != "publish_confluence":
+                output = build_agenda_page_body(items)
+                diagram_html = build_macro_diagram_html(items)
 
             if action == "send_mail":
                 # dict.fromkeys로 순서를 유지한 채 중복 제거.
@@ -665,6 +720,32 @@ def agenda_page():
                     except MailConfigError as e:
                         message, message_ok = f"메일 발송 실패: {e}", False
 
+            elif action == "publish_confluence":
+                if not parent_url:
+                    message, message_ok = "상위 페이지 URL을 입력해주세요.", False
+                elif not page_title:
+                    message, message_ok = "새 안건 페이지 제목을 입력해주세요.", False
+                else:
+                    current_user = auth.get_current_user()
+                    token = resolve_confluence_token(current_user["user_id"] if current_user else None)
+                    if not token:
+                        message, message_ok = (
+                            "Confluence 개인 액세스 토큰(PAT)이 없습니다. "
+                            "워드 변환기 화면에서 내 PAT을 등록해주세요.",
+                            False,
+                        )
+                    else:
+                        try:
+                            publish_result = create_agenda_page(
+                                parent_url, page_title, items, token=token
+                            )
+                            message, message_ok = (
+                                f"'{publish_result['title']}' 안건 페이지를 만들었습니다.",
+                                True,
+                            )
+                        except Exception as e:
+                            message, message_ok = f"안건 페이지 생성 실패: {e}", False
+
     return render_template_string(
         PAGE_TEMPLATE,
         titles_text=titles_text,
@@ -672,11 +753,15 @@ def agenda_page():
         selected_presets=selected_presets,
         extra_to=extra_to,
         subject=subject,
+        parent_url=parent_url,
+        page_title=page_title,
         output=output,
         diagram_html=diagram_html,
+        publish_result=publish_result,
         message=message,
         message_ok=message_ok,
         mail_configured=is_mail_configured(),
+        docx_export_configured=docx_export_configured(),
         current_user=auth.get_current_user(),
     )
 

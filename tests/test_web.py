@@ -202,6 +202,147 @@ class WebAppTest(unittest.TestCase):
             "메일을 보냈습니다: 테스트유저1, 테스트유저2, other@example.com".encode(), resp.data
         )
 
+    def test_publish_confluence_card_hidden_when_feature_not_available(self):
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=False):
+            resp = self.client.get("/agenda")
+
+        self.assertNotIn(b'name="parent_url"', resp.data)
+        self.assertNotIn(b'value="publish_confluence"', resp.data)
+
+    def test_publish_confluence_card_shown_when_feature_available(self):
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=True):
+            resp = self.client.get("/agenda")
+
+        self.assertIn(b'name="parent_url"', resp.data)
+        self.assertIn(b'value="publish_confluence"', resp.data)
+
+    def test_publish_confluence_without_parent_url_shows_error(self):
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=True):
+            resp = self.client.post(
+                "/agenda",
+                data={"titles": "안건1", "action": "publish_confluence", "page_title": "회의록"},
+            )
+
+        self.assertIn("상위 페이지 URL을 입력해주세요".encode(), resp.data)
+
+    def test_publish_confluence_without_page_title_shows_error(self):
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=True):
+            resp = self.client.post(
+                "/agenda",
+                data={
+                    "titles": "안건1",
+                    "action": "publish_confluence",
+                    "parent_url": "https://wiki.example.com/pages/100",
+                },
+            )
+
+        self.assertIn("새 안건 페이지 제목을 입력해주세요".encode(), resp.data)
+
+    def test_publish_confluence_without_token_shows_error(self):
+        with mock.patch(
+            "confluence_agenda.web.app.docx_export_configured", return_value=True
+        ), mock.patch("confluence_agenda.web.app.resolve_confluence_token", return_value=None):
+            resp = self.client.post(
+                "/agenda",
+                data={
+                    "titles": "안건1",
+                    "action": "publish_confluence",
+                    "parent_url": "https://wiki.example.com/pages/100",
+                    "page_title": "회의록",
+                },
+            )
+
+        self.assertIn("PAT".encode(), resp.data)
+
+    def test_publish_confluence_success_shows_created_page_links(self):
+        fake_result = {
+            "page_id": "200",
+            "url": "https://wiki.example.com/x/200",
+            "title": "회의록",
+            "detail_pages": [
+                {"title": "(첨부 1) 안건1", "ok": True, "url": "https://wiki.example.com/x/300"},
+                {"title": "(첨부 2) 안건2", "ok": False, "error": "이미 같은 제목의 페이지가 있습니다."},
+            ],
+        }
+        with mock.patch(
+            "confluence_agenda.web.app.docx_export_configured", return_value=True
+        ), mock.patch(
+            "confluence_agenda.web.app.resolve_confluence_token", return_value="my-pat"
+        ), mock.patch(
+            "confluence_agenda.web.app.create_agenda_page", return_value=fake_result
+        ) as fake_create:
+            resp = self.client.post(
+                "/agenda",
+                data={
+                    "titles": "안건1\n\n안건2",
+                    "action": "publish_confluence",
+                    "parent_url": "https://wiki.example.com/pages/100",
+                    "page_title": "회의록",
+                },
+            )
+
+        fake_create.assert_called_once()
+        args, kwargs = fake_create.call_args
+        self.assertEqual(args[0], "https://wiki.example.com/pages/100")
+        self.assertEqual(args[1], "회의록")
+        self.assertEqual(kwargs["token"], "my-pat")
+
+        body = resp.data.decode("utf-8")
+        self.assertIn("회의록", body)
+        self.assertIn("https://wiki.example.com/x/200", body)
+        self.assertIn("https://wiki.example.com/x/300", body)
+        self.assertIn("이미 같은 제목의 페이지가 있습니다", body)
+
+    def test_publish_confluence_failure_shows_error_message(self):
+        with mock.patch(
+            "confluence_agenda.web.app.docx_export_configured", return_value=True
+        ), mock.patch(
+            "confluence_agenda.web.app.resolve_confluence_token", return_value="my-pat"
+        ), mock.patch(
+            "confluence_agenda.web.app.create_agenda_page",
+            side_effect=RuntimeError("상위 페이지 1을 찾을 수 없습니다(404)."),
+        ):
+            resp = self.client.post(
+                "/agenda",
+                data={
+                    "titles": "안건1",
+                    "action": "publish_confluence",
+                    "parent_url": "https://wiki.example.com/pages/1",
+                    "page_title": "회의록",
+                },
+            )
+
+        self.assertIn("안건 페이지 생성 실패".encode(), resp.data)
+        self.assertIn("찾을 수 없습니다".encode(), resp.data)
+
+    def test_publish_confluence_does_not_show_manual_copy_paste_source_card(self):
+        # API로 이미 다 만들었는데 "소스 생성" 카드가 같이 뜨면, 템플릿
+        # 버튼을 또 누르라는 안내처럼 보여 혼란스럽다 - publish_confluence일
+        # 때는 그 카드가 아예 없어야 한다.
+        fake_result = {
+            "page_id": "200",
+            "url": "https://wiki.example.com/x/200",
+            "title": "회의록",
+            "detail_pages": [],
+        }
+        with mock.patch(
+            "confluence_agenda.web.app.docx_export_configured", return_value=True
+        ), mock.patch(
+            "confluence_agenda.web.app.resolve_confluence_token", return_value="my-pat"
+        ), mock.patch("confluence_agenda.web.app.create_agenda_page", return_value=fake_result):
+            resp = self.client.post(
+                "/agenda",
+                data={
+                    "titles": "안건1",
+                    "action": "publish_confluence",
+                    "parent_url": "https://wiki.example.com/pages/100",
+                    "page_title": "회의록",
+                },
+            )
+
+        self.assertNotIn("생성된 소스".encode(), resp.data)
+        self.assertNotIn(b'ac:name=&#34;create-from-template&#34;', resp.data)
+
 
 class LoginFlowTest(unittest.TestCase):
     """auth.is_configured()가 True일 때(= DATABASE_URL로 로그인이 켜졌을 때)

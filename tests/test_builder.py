@@ -41,6 +41,16 @@ class BuildAgendaPageBodyTest(unittest.TestCase):
 
         self.assertEqual(len(_sections(result)), 5)
 
+    def test_include_setup_section_false_omits_the_create_from_template_button(self):
+        # API로 상세 페이지까지 자동으로 만드는 경로(docx_export.create_agenda_page)는
+        # 사람이 버튼을 누를 필요가 없어서 이 섹션이 아예 없어야 한다.
+        items = [AgendaItem(title="A"), AgendaItem(title="B")]
+        result = build_agenda_page_body(items, include_setup_section=False)
+
+        self.assertEqual(len(_sections(result)), 3)  # 안건별 섹션 2 + 첨부 공유 섹션 1
+        self.assertNotIn("create-from-template", result)
+        self.assertIn("(첨부 1) A", result)
+
     def test_first_section_is_the_page_creation_setup(self):
         items = [AgendaItem(title="예산 승인"), AgendaItem(title="채용 계획")]
         result = build_agenda_page_body(items)
