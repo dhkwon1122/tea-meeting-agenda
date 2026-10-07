@@ -1234,6 +1234,34 @@ class DocumentStyleConfigurationTest(unittest.TestCase):
         self.assertGreater(widths[0], Mm(5))
         self.assertGreater(widths[2], Mm(5))
 
+    def test_table_column_width_is_applied_to_every_row_cell_not_just_grid(self):
+        # python-docx의 Column.width setter는 w:tblGrid/w:gridCol만 바꾸고
+        # 각 행 칸의 w:tcW는 그대로 둔다 - 워드는 gridCol보다 각 칸의 w:tcW를
+        # 우선해서 렌더링하는 것으로 보여서, gridCol만 바꾸면 미리보기는
+        # 맞는데 실제 워드 파일은 여전히 모든 열이 같은 폭으로 나왔다(실사용
+        # 보고). 모든 행의 모든 칸에도 같은 폭이 직접 들어가 있어야 한다.
+        storage = (
+            "<table><tbody>"
+            "<tr><th>번호</th><th>담당자 이름 및 소속 부서 설명이 긴 칸</th><th>비고</th></tr>"
+            "<tr><td>1</td><td>김철수(기획전략팀, 사내 인프라 담당)</td><td>-</td></tr>"
+            "<tr><td>2</td><td>이영희(개발팀, 백엔드 담당)</td><td>-</td></tr>"
+            "</tbody></table>"
+        )
+        resp = _page_response(storage, title="회의록")
+        with mock.patch("requests.get", return_value=resp):
+            data, _ = convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+        document = DocxDocument(io.BytesIO(data))
+        table = document.tables[0]
+        grid_widths = [col.width for col in table.columns]
+        for row in table.rows:
+            for col_index, cell in enumerate(row.cells):
+                tc_w = cell._tc.tcPr.find(qn("w:tcW"))
+                self.assertIsNotNone(tc_w)
+                self.assertEqual(tc_w.get(qn("w:type")), "dxa")
+                self.assertAlmostEqual(
+                    int(tc_w.get(qn("w:w"))), int(grid_widths[col_index] / 635), delta=2
+                )
+
     def test_table_column_with_rowspan_cell_still_gets_measured_from_other_rows(self):
         # colspan>1인 칸은 폭 계산에서 건너뛰지만, 그 열의 "다른" 행에 있는
         # (colspan==1) 칸으로는 여전히 폭을 가늠할 수 있어야 한다.

@@ -1628,7 +1628,15 @@ def _apply_content_based_column_widths(
 
     table.autofit = False
     for index, column in enumerate(table.columns):
-        column.width = Mm(_TABLE_USABLE_WIDTH_MM * weights[index] / total_weight)
+        width = Mm(_TABLE_USABLE_WIDTH_MM * weights[index] / total_weight)
+        column.width = width
+        # python-docx의 Column.width setter는 w:tblGrid/w:gridCol만 바꾸고
+        # 각 행에 있는 칸들의 w:tcW는 그대로 둔다(실사용에서 발견: 미리보기는
+        # 맞는데 실제 워드 파일만 전부 같은 폭 - 워드가 gridCol보다 각 칸의
+        # w:tcW를 우선해서 렌더링하는 것으로 보임). 그래서 열의 모든 칸에도
+        # 같은 폭을 직접 맞춰 줘야 한다.
+        for cell in column.cells:
+            cell.width = width
 
     # EMU(python-docx의 길이 단위) -> dxa(OOXML 표 폭 단위, 1/20pt) 변환:
     # 1pt = 12700EMU이므로 1dxa(=1/20pt) = 635EMU.
