@@ -1353,6 +1353,55 @@ class ImageEmbeddingTest(unittest.TestCase):
         self.assertEqual(len(document.inline_shapes), 0)
         self.assertTrue(any("missing.png" in t for t in _docx_paragraph_texts(data)))
 
+    def test_placeholder_explains_why_when_attachment_not_in_list(self):
+        # docx 파일을 직접 못 보내주는 환경에서도 변환된 문서 자체에서 원인을
+        # 바로 읽을 수 있어야 한다 - 자리표시자에 실패 이유를 적는다.
+        root_storage = (
+            '<ac:image xmlns:ac="http://www.atlassian.com/schema/confluence/4/ac/" '
+            'xmlns:ri="http://www.atlassian.com/schema/confluence/4/ri/">'
+            '<ri:attachment ri:filename="missing.png"/>'
+            "</ac:image>"
+        )
+        root_resp = _page_response(root_storage, title="회의록")
+        attachments_resp = _fake_response(
+            json_data={"results": [{"title": "other.png", "_links": {"download": "/x"}}]}
+        )
+
+        def fake_get(url, **kwargs):
+            if url.endswith("/rest/api/content/123"):
+                return root_resp
+            if url.endswith("/rest/api/content/123/child/attachment"):
+                return attachments_resp
+            raise AssertionError(f"unexpected url: {url}")
+
+        with mock.patch("requests.get", side_effect=fake_get):
+            data, _ = convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+        texts = _docx_paragraph_texts(data)
+        self.assertTrue(any("missing.png" in t and "목록에 없음" in t and "other.png" in t for t in texts))
+
+    def test_placeholder_explains_attachment_list_fetch_failure(self):
+        root_storage = (
+            '<ac:image xmlns:ac="http://www.atlassian.com/schema/confluence/4/ac/" '
+            'xmlns:ri="http://www.atlassian.com/schema/confluence/4/ri/">'
+            '<ri:attachment ri:filename="shot.png"/>'
+            "</ac:image>"
+        )
+        root_resp = _page_response(root_storage, title="회의록")
+
+        def fake_get(url, **kwargs):
+            if url.endswith("/rest/api/content/123"):
+                return root_resp
+            if url.endswith("/rest/api/content/123/child/attachment"):
+                return _fake_response(status_code=403, text="forbidden")
+            raise AssertionError(f"unexpected url: {url}")
+
+        with mock.patch("requests.get", side_effect=fake_get):
+            data, _ = convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+        texts = _docx_paragraph_texts(data)
+        self.assertTrue(any("shot.png" in t and "HTTP 403" in t for t in texts))
+
     def test_image_inside_linked_page_is_fetched_from_that_pages_own_attachments(self):
         # 연결된 페이지의 이미지는 그 페이지 "자신"의 첨부파일 목록에서
         # 찾아야 한다(원본 페이지의 첨부파일 목록과 혼동하면 안 됨).

@@ -562,14 +562,18 @@ def _fetch_child_pages(base_url: str, token: str, page_id: str) -> List[dict]:
     return resp.json().get("results") or []
 
 
-def _fetch_page_attachments(base_url: str, token: str, page_id: str) -> dict:
+def _fetch_page_attachments(base_url: str, token: str, page_id: str) -> Tuple[dict, Optional[str]]:
     """그 페이지에 실제로 붙어 있는 첨부파일 목록을 (파일명 -> 다운로드
     경로) 맵으로 가져온다 - ac:image가 참조하는 ri:attachment는 파일명만
     있고 실제로 받을 수 있는 URL이 없어서, 이 목록에서 같은 파일명을 찾아
     그 다운로드 경로(_links.download, 사이트 루트 기준 상대 경로)로
-    내려받는다. 실패하면(네트워크 오류 등) 조용히 빈 맵을 돌려준다 -
-    이미지 하나를 못 가져왔다고 변환 전체가 실패하면 안 되므로, 못 가져온
-    이미지는 자리표시자로 대신한다."""
+    내려받는다.
+
+    반환값은 (맵, 실패 이유 또는 None) - 실패해도 예외를 던지지 않는다
+    (이미지 하나를 못 가져왔다고 변환 전체가 실패하면 안 되므로). 대신
+    실패 이유를 돌려줘서, 호출한 쪽이 그 이미지의 자리표시자에 "왜"
+    못 가져왔는지 적을 수 있게 한다 - docx 파일을 직접 못 보내주는
+    환경에서도 변환된 문서 자체에서 원인을 바로 읽을 수 있다."""
     try:
         resp = requests.get(
             f"{base_url}/rest/api/content/{page_id}/child/attachment",
@@ -579,20 +583,23 @@ def _fetch_page_attachments(base_url: str, token: str, page_id: str) -> dict:
             verify=_ssl_verify(),
             proxies=_proxies(),
         )
-    except (requests.RequestException, OSError):
-        return {}
+    except (requests.RequestException, OSError) as exc:
+        return {}, f"첨부파일 목록 조회 중 오류: {exc}"
     if resp.status_code != 200:
-        return {}
+        return {}, f"첨부파일 목록 조회 실패(HTTP {resp.status_code})"
     mapping = {}
     for item in resp.json().get("results") or []:
         filename = item.get("title")
         download = (item.get("_links") or {}).get("download")
         if filename and download:
             mapping[filename] = download
-    return mapping
+    return mapping, None
 
 
-def _fetch_attachment_bytes(base_url: str, token: str, download_path: str) -> Optional[bytes]:
+def _fetch_attachment_bytes(
+    base_url: str, token: str, download_path: str
+) -> Tuple[Optional[bytes], Optional[str]]:
+    """반환값은 (바이트 또는 None, 실패 이유 또는 None) - _fetch_page_attachments와 같은 이유."""
     url = download_path if download_path.startswith("http") else f"{base_url}{download_path}"
     try:
         resp = requests.get(
@@ -602,14 +609,24 @@ def _fetch_attachment_bytes(base_url: str, token: str, download_path: str) -> Op
             verify=_ssl_verify(),
             proxies=_proxies(),
         )
-    except (requests.RequestException, OSError):
-        return None
+    except (requests.RequestException, OSError) as exc:
+        return None, f"다운로드 중 오류: {exc}"
     if resp.status_code != 200:
-        return None
-    return resp.content
+        return None, f"다운로드 실패(HTTP {resp.status_code})"
+    return resp.content, None
 
 
 _image_key_counter = itertools.count()
+
+
+class _ImageFetchFailure:
+    """이미지를 못 가져온 이유를 담아 둔다(images 딕셔너리에 바이트 대신
+    이 객체가 들어가면 실패했다는 뜻) - _render_image/_add_inline_image가
+    자리표시자 글자에 이 이유를 그대로 적어서, docx 파일을 못 보내주는
+    상황에서도 변환된 문서를 열어 보기만 하면 원인을 알 수 있게 한다."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
 
 
 def _fetch_images_for_page(
@@ -617,11 +634,12 @@ def _fetch_images_for_page(
 ) -> None:
     """container(루트 페이지 전체 또는 연결된 한 페이지의 본문) 안의
     ac:image가 가리키는 첨부파일을 전부 내려받아 images_out에 채운다 -
-    (키 -> 이미지 바이트). 키는 id(element)가 아니라 요소에 직접 심어 둔
-    속성("data-image-key")이다 - lxml은 같은 노드라도 트리를 손댄 뒤
-    다시 접근하면 다른 Python 객체(다른 id())를 돌려줄 수 있어서, 나중에
-    렌더링할 때 object id로 찾으면 못 찾는 경우가 있었다(실제로 이 문제로
-    이미지가 전부 자리표시자로 빠졌다) - 속성은 XML 데이터 자체라 항상 그대로다.
+    (키 -> 이미지 바이트 또는 _ImageFetchFailure). 키는 id(element)가
+    아니라 요소에 직접 심어 둔 속성("data-image-key")이다 - lxml은 같은
+    노드라도 트리를 손댄 뒤 다시 접근하면 다른 Python 객체(다른 id())를
+    돌려줄 수 있어서, 나중에 렌더링할 때 object id로 찾으면 못 찾는
+    경우가 있었다(실제로 이 문제로 이미지가 전부 자리표시자로 빠졌다) -
+    속성은 XML 데이터 자체라 항상 그대로다.
 
     container에 이미지가 하나도 없으면 첨부파일 목록 조회 자체를 건너뛴다
     (불필요한 API 호출 방지). 반드시 그 이미지가 실제로 속한 페이지(=이
@@ -632,22 +650,34 @@ def _fetch_images_for_page(
     image_elements = list(container.iter(f"{{{_AC_NS}}}image"))
     if not image_elements:
         return
-    attachments = _fetch_page_attachments(base_url, token, page_id)
-    if not attachments:
-        return
+    attachments, list_error = _fetch_page_attachments(base_url, token, page_id)
+
     for image in image_elements:
+        key = str(next(_image_key_counter))
+        image.set("data-image-key", key)
+
         attachment = image.find("ri:attachment", namespaces={"ri": _RI_NS})
-        if attachment is None:
+        filename = attachment.get(f"{{{_RI_NS}}}filename") if attachment is not None else None
+        if not filename:
+            images_out[key] = _ImageFetchFailure("ri:attachment에 ri:filename이 없음")
             continue
-        filename = attachment.get(f"{{{_RI_NS}}}filename")
-        download_path = attachments.get(filename) if filename else None
+        if list_error:
+            images_out[key] = _ImageFetchFailure(list_error)
+            continue
+
+        download_path = attachments.get(filename)
         if not download_path:
+            sample = ", ".join(sorted(attachments)[:5]) or "(이 페이지에 첨부파일 없음)"
+            images_out[key] = _ImageFetchFailure(
+                f"'{filename}'이 이 페이지 첨부파일 목록에 없음 - 목록에 있는 파일 예: {sample}"
+            )
             continue
-        data = _fetch_attachment_bytes(base_url, token, download_path)
+
+        data, download_error = _fetch_attachment_bytes(base_url, token, download_path)
         if data:
-            key = str(next(_image_key_counter))
-            image.set("data-image-key", key)
             images_out[key] = data
+        else:
+            images_out[key] = _ImageFetchFailure(f"'{filename}' {download_error}")
 
 
 # ── 연결된 페이지(include/excerpt-include/children) 펼치기 ──────────────
@@ -1401,13 +1431,18 @@ _MAX_IMAGE_WIDTH_MM = 170
 
 
 def _resolve_image_bytes(image: etree._Element, images: dict) -> Optional[bytes]:
-    return images.get(image.get("data-image-key"))
+    result = images.get(image.get("data-image-key"))
+    return result if isinstance(result, bytes) else None
 
 
-def _image_placeholder_text(image: etree._Element) -> str:
+def _image_placeholder_text(image: etree._Element, images: dict) -> str:
     attachment = image.find("ri:attachment", namespaces={"ri": _RI_NS})
     filename = attachment.get(f"{{{_RI_NS}}}filename") if attachment is not None else None
-    return f"[이미지: {filename}]" if filename else "[이미지]"
+    base = f"[이미지: {filename}]" if filename else "[이미지]"
+    result = images.get(image.get("data-image-key"))
+    if isinstance(result, _ImageFetchFailure):
+        return f"{base} - {result.reason}"
+    return base
 
 
 def _shrink_picture_to_max_width(picture) -> None:
@@ -1432,7 +1467,7 @@ def _render_image(document: DocxDocument, image: etree._Element, images: dict) -
             return
         except Exception:
             pass  # 깨진 이미지 등 - 아래 자리표시자로 대신한다.
-    note = document.add_paragraph(_image_placeholder_text(image))
+    note = document.add_paragraph(_image_placeholder_text(image, images))
     note.runs[0].italic = True
 
 
@@ -1453,7 +1488,7 @@ def _add_inline_image(paragraph, image: etree._Element, images: dict) -> None:
             return
         except Exception:
             pass
-    run = paragraph.add_run(_image_placeholder_text(image))
+    run = paragraph.add_run(_image_placeholder_text(image, images))
     run.italic = True
 
 
