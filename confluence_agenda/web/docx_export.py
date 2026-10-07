@@ -1473,7 +1473,14 @@ def _apply_content_based_column_widths(
     행의 같은 열 내용으로도 충분히 가늠할 수 있다.
 
     table.autofit=False로 바꿔 워드가 자체적으로 다시 계산하지 않고 우리가
-    지정한 폭을 그대로 쓰게 한다(열려서 바로 보일 모양을 우리가 보장)."""
+    지정한 폭을 그대로 쓰게 한다(열려서 바로 보일 모양을 우리가 보장).
+
+    열 폭(w:tblGrid/w:gridCol, w:tcW)만 설정하면 워드가 실제로는 무시하고
+    다시 균등하게 그리는 경우가 있었다(실사용에서 발견) - 표 전체 폭
+    (w:tblPr/w:tblW)이 python-docx 기본값인 "auto"(0)로 남아 있어서,
+    tblLayout이 "fixed"라도 워드가 전체 폭을 다시 계산하면서 열 폭도
+    같이 재분배해 버린 것이었다. 그래서 표 전체 폭도 "고정값"(각 열 폭의
+    합)으로 명시해야 열 폭이 실제로 그대로 지켜진다."""
     weights = [0] * col_count
     for _row_index, col_index, _rowspan, colspan, cell in placements:
         if colspan != 1 or col_index >= col_count:
@@ -1489,6 +1496,15 @@ def _apply_content_based_column_widths(
     table.autofit = False
     for index, column in enumerate(table.columns):
         column.width = Mm(_TABLE_USABLE_WIDTH_MM * weights[index] / total_weight)
+
+    # EMU(python-docx의 길이 단위) -> dxa(OOXML 표 폭 단위, 1/20pt) 변환:
+    # 1pt = 12700EMU이므로 1dxa(=1/20pt) = 635EMU.
+    total_dxa = sum(int(column.width / 635) for column in table.columns)
+    tbl_w = table._tbl.tblPr.find(qn("w:tblW"))
+    if tbl_w is None:
+        tbl_w = etree.SubElement(table._tbl.tblPr, qn("w:tblW"))
+    tbl_w.set(qn("w:type"), "dxa")
+    tbl_w.set(qn("w:w"), str(total_dxa))
 
 
 def _render_table(document: DocxDocument, table_element: etree._Element) -> None:

@@ -1207,6 +1207,13 @@ class DocumentStyleConfigurationTest(unittest.TestCase):
         table = document.tables[0]
         widths = [col.width for col in table.columns]
         self.assertFalse(table.autofit)
+        # 표 전체 폭(w:tblW)도 열 폭 합과 같은 "고정값"으로 맞춰져 있어야
+        # 한다 - 이게 "auto"로 남아 있으면 워드가 열 폭을 다시 균등하게
+        # 그려 버렸다(실사용에서 발견된 버그: 미리보기는 맞는데 실제 워드
+        # 파일만 전부 같은 폭으로 나옴).
+        tbl_w = table._tbl.tblPr.find(qn("w:tblW"))
+        self.assertEqual(tbl_w.get(qn("w:type")), "dxa")
+        self.assertAlmostEqual(int(tbl_w.get(qn("w:w"))), sum(widths) / 635, delta=5)
         # 가운데 열(내용이 훨씨 길다)이 양쪽보다 뚜렷하게 넓어야 한다.
         self.assertGreater(widths[1], widths[0] * 2)
         self.assertGreater(widths[1], widths[2] * 2)
