@@ -1234,6 +1234,61 @@ class DocumentStyleConfigurationTest(unittest.TestCase):
         self.assertGreater(widths[0], Mm(5))
         self.assertGreater(widths[2], Mm(5))
 
+    def test_table_colgroup_widths_take_priority_over_text_length(self):
+        # 사용자가 Confluence에서 표 열 폭을 직접 조정하면 <colgroup><col
+        # style="width: Npx"/></colgroup>에 그 값이 저장된다 - 글자 양으로
+        # 추정하는 것보다 이 값을 그대로 쓰는 게 더 정확하다는 요청
+        # ("원본 표에 설정된 폭이 있다면 그걸 비율로 먼저 치환"). 아래 표는
+        # 글자 수로 보면 가운데 열이 훨씬 넓어야 하지만, colgroup은 정반대
+        # 비율(1:4:1)로 지정해 뒀으므로 colgroup 쪽이 이겨야 한다.
+        storage = (
+            "<table>"
+            "<colgroup>"
+            '<col style="width: 60.0px;" />'
+            '<col style="width: 240.0px;" />'
+            '<col style="width: 60.0px;" />'
+            "</colgroup>"
+            "<tbody>"
+            "<tr><th>번호</th><th>담당자 이름 및 소속 부서 설명이 긴 칸</th><th>비고</th></tr>"
+            "<tr><td>1</td><td>짧음</td><td>-</td></tr>"
+            "</tbody></table>"
+        )
+        resp = _page_response(storage, title="회의록")
+        with mock.patch("requests.get", return_value=resp):
+            data, _ = convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+        document = DocxDocument(io.BytesIO(data))
+        table = document.tables[0]
+        widths = [col.width for col in table.columns]
+        # colgroup 비율(1:4:1)대로 가운데 열이 양쪽 각각의 약 4배여야 한다.
+        self.assertAlmostEqual(widths[1] / widths[0], 4.0, delta=0.3)
+        self.assertAlmostEqual(widths[1] / widths[2], 4.0, delta=0.3)
+        self.assertAlmostEqual(widths[0], widths[2], delta=Mm(1))
+
+    def test_table_colgroup_widths_ignored_when_incomplete(self):
+        # colgroup이 일부 열만 폭을 주거나 아예 없으면(흔히 있는 일) 기존
+        # 글자 수 기반 계산으로 넘어가야 한다 - 섣불리 일부 정보만으로
+        # 비율을 정하면 더 틀어질 수 있다.
+        storage = (
+            "<table>"
+            "<colgroup>"
+            '<col style="width: 60.0px;" />'
+            "<col />"
+            "<col />"
+            "</colgroup>"
+            "<tbody>"
+            "<tr><th>번호</th><th>담당자 이름 및 소속 부서 설명이 긴 칸</th><th>비고</th></tr>"
+            "<tr><td>1</td><td>김철수(기획전략팀, 사내 인프라 담당)</td><td>-</td></tr>"
+            "</tbody></table>"
+        )
+        resp = _page_response(storage, title="회의록")
+        with mock.patch("requests.get", return_value=resp):
+            data, _ = convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+        document = DocxDocument(io.BytesIO(data))
+        table = document.tables[0]
+        widths = [col.width for col in table.columns]
+        self.assertGreater(widths[1], widths[0] * 2)
+        self.assertGreater(widths[1], widths[2] * 2)
+
     def test_table_column_width_is_applied_to_every_row_cell_not_just_grid(self):
         # python-docx의 Column.width setter는 w:tblGrid/w:gridCol만 바꾸고
         # 각 행 칸의 w:tcW는 그대로 둔다 - 워드는 gridCol보다 각 칸의 w:tcW를

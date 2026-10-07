@@ -1595,15 +1595,51 @@ def _visual_text_width(text: str) -> int:
     return sum(2 if _is_wide_char(ch) else 1 for ch in text)
 
 
+_CSS_WIDTH_PX_RE = re.compile(r"width\s*:\s*([0-9.]+)\s*px", re.IGNORECASE)
+
+
+def _colgroup_column_widths(
+    table_element: etree._Element, col_count: int
+) -> Optional[List[float]]:
+    """사용자가 Confluence 표에서 직접 열 폭을 조정하면 <colgroup><col
+    style="width: Npx"/>...</colgroup>에 그 값이 그대로 저장된다 - 글자
+    양으로 추정하기보다 이 값이 있으면 그 비율을 먼저 쓰는 게 더 정확하다
+    (사용자 요청: "원본 표에 설정된 폭이 있다면 그걸 비율로 먼저 치환").
+    모든 열에 대해 폭을 다 구할 수 있을 때만 쓰고, colgroup이 없거나 일부
+    열이라도 폭을 못 구하면 None을 돌려줘서 글자 수 기반 계산으로 넘어가게
+    한다."""
+    colgroup = next((child for child in table_element if _local(child.tag) == "colgroup"), None)
+    if colgroup is None:
+        return None
+
+    widths: List[Optional[float]] = []
+    for col in colgroup:
+        if _local(col.tag) != "col":
+            continue
+        span = max(1, _int_attr(col, "span"))
+        match = _CSS_WIDTH_PX_RE.search(col.get("style") or "")
+        width = float(match.group(1)) if match else None
+        widths.extend([width] * span)
+
+    if len(widths) < col_count or any(not w or w <= 0 for w in widths[:col_count]):
+        return None
+    return widths[:col_count]
+
+
 def _apply_content_based_column_widths(
-    table, placements: List[Tuple[int, int, int, int, etree._Element]], col_count: int
+    table,
+    table_element: etree._Element,
+    placements: List[Tuple[int, int, int, int, etree._Element]],
+    col_count: int,
 ) -> None:
-    """칸 안 글자 양에 비례해서 각 열의 폭을 미리 계산해 지정한다 - 지금까지는
-    python-docx가 만드는 기본값(모든 열이 똑같은 폭)을 그대로 뒀는데, 실제
-    표는 열마다 내용 길이가 크게 달라서 요청이 들어왔다(사용자: "내용에
-    따라 동적으로 조절이 가능할까?"). colspan으로 합쳐진 칸은 "한 열의
-    폭"이 뭘 뜻하는지 애매해서 폭 계산에서는 건너뛴다 - 합쳐지지 않은 다른
-    행의 같은 열 내용으로도 충분히 가늠할 수 있다.
+    """각 열의 폭을 미리 계산해 지정한다 - 지금까지는 python-docx가 만드는
+    기본값(모든 열이 똑같은 폭)을 그대로 뒀는데, 실제 표는 열마다 내용
+    길이가 크게 달라서 요청이 들어왔다(사용자: "내용에 따라 동적으로
+    조절이 가능할까?"). 원본 표에 사용자가 직접 조정해 둔 폭(colgroup)이
+    있으면 그 비율을 그대로 쓰고, 없으면 글자 양(_visual_text_width)으로
+    추정한다. colspan으로 합쳐진 칸은 글자 수 기반 추정에서는 "한 열의
+    폭"이 뭘 뜻하는지 애매해서 건너뛴다 - 합쳐지지 않은 다른 행의 같은 열
+    내용으로도 충분히 가늠할 수 있다.
 
     table.autofit=False로 바꿔 워드가 자체적으로 다시 계산하지 않고 우리가
     지정한 폭을 그대로 쓰게 한다(열려서 바로 보일 모양을 우리가 보장).
@@ -1614,14 +1650,16 @@ def _apply_content_based_column_widths(
     tblLayout이 "fixed"라도 워드가 전체 폭을 다시 계산하면서 열 폭도
     같이 재분배해 버린 것이었다. 그래서 표 전체 폭도 "고정값"(각 열 폭의
     합)으로 명시해야 열 폭이 실제로 그대로 지켜진다."""
-    weights = [0] * col_count
-    for _row_index, col_index, _rowspan, colspan, cell in placements:
-        if colspan != 1 or col_index >= col_count:
-            continue
-        text = "".join(cell.itertext())
-        weights[col_index] = max(weights[col_index], _visual_text_width(text))
+    weights = _colgroup_column_widths(table_element, col_count)
+    if weights is None:
+        weights = [0] * col_count
+        for _row_index, col_index, _rowspan, colspan, cell in placements:
+            if colspan != 1 or col_index >= col_count:
+                continue
+            text = "".join(cell.itertext())
+            weights[col_index] = max(weights[col_index], _visual_text_width(text))
+        weights = [max(w, _TABLE_MIN_COLUMN_WEIGHT) for w in weights]
 
-    weights = [max(w, _TABLE_MIN_COLUMN_WEIGHT) for w in weights]
     total_weight = sum(weights)
     if total_weight <= 0:
         return
@@ -1691,7 +1729,7 @@ def _render_table(document: DocxDocument, table_element: etree._Element, images:
         table.style = "Table Grid"
     except KeyError:
         pass
-    _apply_content_based_column_widths(table, placements, col_count)
+    _apply_content_based_column_widths(table, table_element, placements, col_count)
 
     for row_index, col_index, rowspan, colspan, cell in placements:
         end_row = min(row_index + rowspan, row_count) - 1
