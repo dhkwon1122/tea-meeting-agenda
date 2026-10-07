@@ -1167,6 +1167,19 @@ class DocumentStyleConfigurationTest(unittest.TestCase):
         self.assertAlmostEqual(section.top_margin, Mm(20), delta=200)
         self.assertAlmostEqual(section.left_margin, Mm(20), delta=200)
 
+    def test_compatibility_mode_is_bumped_to_modern_word(self):
+        # python-docx 기본 템플릿은 "호환 모드"(워드 2010, compatibilityMode=14)
+        # 상태인데, 이 호환 모드에서는 워드 데스크톱이 표 열 폭 같은 레이아웃을
+        # 옛 버전 방식으로 다시 계산해 버리는 경우가 있다(실사용 보고: 표마다
+        # 글자 양이 달라도 폭이 항상 똑같이 나옴 - 표 하나의 문제가 아니라
+        # 문서 전체에 걸친 호환성 문제로 보임).
+        document = self._convert_document()
+        settings = document.settings.element
+        compat_values = {
+            s.get(qn("w:name")): s.get(qn("w:val")) for s in settings.iter(qn("w:compatSetting"))
+        }
+        self.assertEqual(compat_values.get("compatibilityMode"), "15")
+
     def test_table_header_row_is_bold_shaded_and_10pt(self):
         storage = (
             "<table><tbody>"

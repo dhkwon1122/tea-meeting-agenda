@@ -599,8 +599,17 @@ def _fetch_page_attachments(base_url: str, token: str, page_id: str) -> Tuple[di
 def _fetch_attachment_bytes(
     base_url: str, token: str, download_path: str
 ) -> Tuple[Optional[bytes], Optional[str]]:
-    """반환값은 (바이트 또는 None, 실패 이유 또는 None) - _fetch_page_attachments와 같은 이유."""
-    url = download_path if download_path.startswith("http") else f"{base_url}{download_path}"
+    """반환값은 (바이트 또는 None, 실패 이유 또는 None) - _fetch_page_attachments와 같은 이유.
+
+    실패 이유에 실제로 요청한 URL을 그대로 적는다 - "다운로드 실패(HTTP 404)"
+    만으로는 사내 API 게이트웨이가 /rest/api/* 경로만 허용하고 이 첨부파일
+    다운로드 경로(/download/attachments/...)는 막아 둔 경우인지 구분할 수
+    없는데, URL이 있으면 브라우저로 직접 열어서(로그인한 상태로) 확인해 볼
+    수 있고 사내망 담당자에게 바로 전달할 수도 있다."""
+    if download_path.startswith("http"):
+        url = download_path
+    else:
+        url = f"{base_url.rstrip('/')}/{download_path.lstrip('/')}"
     try:
         resp = requests.get(
             url,
@@ -610,9 +619,9 @@ def _fetch_attachment_bytes(
             proxies=_proxies(),
         )
     except (requests.RequestException, OSError) as exc:
-        return None, f"다운로드 중 오류: {exc}"
+        return None, f"다운로드 중 오류({url}): {exc}"
     if resp.status_code != 200:
-        return None, f"다운로드 실패(HTTP {resp.status_code})"
+        return None, f"다운로드 실패(HTTP {resp.status_code}): {url}"
     return resp.content, None
 
 
@@ -1245,7 +1254,24 @@ def _shade_cell(cell, hex_color: str) -> None:
     shading.set(qn("w:fill"), hex_color)
 
 
+def _modernize_compatibility_mode(document: DocxDocument) -> None:
+    """python-docx 기본 템플릿은 "호환 모드"(워드 2010, compatibilityMode=14)로
+    표시돼 있다. 이 호환 모드에서는 워드 데스크톱이 표의 열 폭 같은 일부
+    레이아웃을 옛 버전 방식으로 다시 계산해서, 우리가 지정한 열 폭(w:tblGrid/
+    w:tblW)을 무시하고 전부 똑같은 폭으로 그려 버리는 경우가 있다 - 실사용
+    보고("글자 양이 뚜렷하게 다른 표에서도 계속 동일해")가 표 하나의 문제가
+    아니라 문서 전체에 걸쳐 똑같이 일어난 것과 정확히 들어맞는다. 워드
+    2013 이후 호환 모드(15)로 올려서 "호환 모드" 표시 없는 일반 문서로
+    취급되게 한다."""
+    settings = document.settings.element
+    for setting in settings.iter(qn("w:compatSetting")):
+        if setting.get(qn("w:name")) == "compatibilityMode":
+            setting.set(qn("w:val"), "15")
+
+
 def _configure_document_styles(document: DocxDocument) -> None:
+    _modernize_compatibility_mode(document)
+
     for section in document.sections:
         section.top_margin = Mm(20)
         section.bottom_margin = Mm(20)
