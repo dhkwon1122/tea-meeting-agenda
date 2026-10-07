@@ -1342,6 +1342,34 @@ class ImageEmbeddingTest(unittest.TestCase):
         document = DocxDocument(io.BytesIO(data))
         self.assertEqual(len(document.inline_shapes), 1)
 
+    def test_image_download_tries_direct_attachments_url_before_listing_attachments(self):
+        # 사내망에서 "GET /download/attachments/{id}/{filename}"로 직접
+        # 받으면 된다고 확인됨 - 첨부파일 목록 API를 거치지 않고도 이 주소로
+        # 바로 받아야 한다(목록 API 쪽은 게이트웨이에서 막혀 404가 나는
+        # 경우가 있었음).
+        root_storage = (
+            '<ac:image xmlns:ac="http://www.atlassian.com/schema/confluence/4/ac/" '
+            'xmlns:ri="http://www.atlassian.com/schema/confluence/4/ri/">'
+            '<ri:attachment ri:filename="shot.png"/>'
+            "</ac:image>"
+        )
+        root_resp = _page_response(root_storage, title="회의록")
+        download_resp = _fake_response(text="")
+        download_resp.content = _PNG_1PX
+
+        def fake_get(url, **kwargs):
+            if url.endswith("/rest/api/content/123"):
+                return root_resp
+            if url.endswith("/download/attachments/123/shot.png"):
+                return download_resp
+            raise AssertionError(f"unexpected url: {url}")
+
+        with mock.patch("requests.get", side_effect=fake_get):
+            data, _ = convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+
+        document = DocxDocument(io.BytesIO(data))
+        self.assertEqual(len(document.inline_shapes), 1)
+
     def test_image_without_matching_attachment_falls_back_to_placeholder(self):
         root_storage = (
             '<ac:image xmlns:ac="http://www.atlassian.com/schema/confluence/4/ac/" '
@@ -1355,6 +1383,8 @@ class ImageEmbeddingTest(unittest.TestCase):
         def fake_get(url, **kwargs):
             if url.endswith("/rest/api/content/123"):
                 return root_resp
+            if url.endswith("/download/attachments/123/missing.png"):
+                return _fake_response(status_code=404, text="")
             if url.endswith("/rest/api/content/123/child/attachment"):
                 return attachments_resp
             raise AssertionError(f"unexpected url: {url}")
@@ -1383,6 +1413,8 @@ class ImageEmbeddingTest(unittest.TestCase):
         def fake_get(url, **kwargs):
             if url.endswith("/rest/api/content/123"):
                 return root_resp
+            if url.endswith("/download/attachments/123/missing.png"):
+                return _fake_response(status_code=404, text="")
             if url.endswith("/rest/api/content/123/child/attachment"):
                 return attachments_resp
             raise AssertionError(f"unexpected url: {url}")
@@ -1405,6 +1437,8 @@ class ImageEmbeddingTest(unittest.TestCase):
         def fake_get(url, **kwargs):
             if url.endswith("/rest/api/content/123"):
                 return root_resp
+            if url.endswith("/download/attachments/123/shot.png"):
+                return _fake_response(status_code=404, text="")
             if url.endswith("/rest/api/content/123/child/attachment"):
                 return _fake_response(status_code=403, text="forbidden")
             raise AssertionError(f"unexpected url: {url}")

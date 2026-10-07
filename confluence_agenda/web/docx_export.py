@@ -110,6 +110,7 @@ import re
 from io import BytesIO
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
+from urllib.parse import quote
 
 import requests
 
@@ -596,9 +597,15 @@ def _fetch_page_attachments(base_url: str, token: str, page_id: str) -> Tuple[di
     return mapping, None
 
 
-def _fetch_attachment_bytes(
-    base_url: str, token: str, download_path: str
-) -> Tuple[Optional[bytes], Optional[str]]:
+def _direct_attachment_download_url(base_url: str, page_id: str, filename: str) -> str:
+    """"GET /download/attachments/{페이지ID}/{파일명}"으로 바로 받을 수
+    있다고 확인된 경로를 직접 조합한다(사내망에서 실측 확인) - 첨부파일
+    목록 API의 _links.download 값을 거치지 않고 바로 이 URL부터 시도한다.
+    파일명에 공백·한글 등이 있으면 URL 인코딩이 필요하다."""
+    return f"{base_url.rstrip('/')}/download/attachments/{page_id}/{quote(filename)}"
+
+
+def _fetch_attachment_bytes(url: str, token: str) -> Tuple[Optional[bytes], Optional[str]]:
     """반환값은 (바이트 또는 None, 실패 이유 또는 None) - _fetch_page_attachments와 같은 이유.
 
     실패 이유에 실제로 요청한 URL을 그대로 적는다 - "다운로드 실패(HTTP 404)"
@@ -606,10 +613,6 @@ def _fetch_attachment_bytes(
     다운로드 경로(/download/attachments/...)는 막아 둔 경우인지 구분할 수
     없는데, URL이 있으면 브라우저로 직접 열어서(로그인한 상태로) 확인해 볼
     수 있고 사내망 담당자에게 바로 전달할 수도 있다."""
-    if download_path.startswith("http"):
-        url = download_path
-    else:
-        url = f"{base_url.rstrip('/')}/{download_path.lstrip('/')}"
     try:
         resp = requests.get(
             url,
@@ -650,16 +653,23 @@ def _fetch_images_for_page(
     경우가 있었다(실제로 이 문제로 이미지가 전부 자리표시자로 빠졌다) -
     속성은 XML 데이터 자체라 항상 그대로다.
 
-    container에 이미지가 하나도 없으면 첨부파일 목록 조회 자체를 건너뛴다
-    (불필요한 API 호출 방지). 반드시 그 이미지가 실제로 속한 페이지(=이
-    함수를 부르는 시점의 page_id)의 첨부파일 목록으로 찾아야 한다 - 연결된
-    여러 페이지가 하나의 트리로 합쳐지고 나면 "이 이미지가 원래 어느
-    페이지 것이었는지"를 더는 알 수 없기 때문에, 페이지를 펼치는 바로 그
-    자리에서 처리한다."""
+    container에 이미지가 하나도 없으면 아무 API도 안 부른다(불필요한 호출
+    방지). 반드시 그 이미지가 실제로 속한 페이지(=이 함수를 부르는 시점의
+    page_id)로 조합/조회해야 한다 - 연결된 여러 페이지가 하나의 트리로
+    합쳐지고 나면 "이 이미지가 원래 어느 페이지 것이었는지"를 더는 알 수
+    없기 때문에, 페이지를 펼치는 바로 그 자리에서 처리한다.
+
+    먼저 "GET /download/attachments/{페이지ID}/{파일명}"을 직접 조합해
+    시도한다(사내망에서 실측 확인된 방식) - 첨부파일 목록 API를 아예 안
+    거쳐도 되므로 보통은 이거 하나로 끝난다. 혹시 이 방식이 안 되는
+    첨부파일이 있으면(예: 파일명이 최신 버전에서 바뀐 경우) 첨부파일
+    목록 API의 _links.download 값으로 한 번 더 시도한다."""
     image_elements = list(container.iter(f"{{{_AC_NS}}}image"))
     if not image_elements:
         return
-    attachments, list_error = _fetch_page_attachments(base_url, token, page_id)
+
+    attachments: Optional[dict] = None
+    list_error: Optional[str] = None
 
     for image in image_elements:
         key = str(next(_image_key_counter))
@@ -670,23 +680,42 @@ def _fetch_images_for_page(
         if not filename:
             images_out[key] = _ImageFetchFailure("ri:attachment에 ri:filename이 없음")
             continue
-        if list_error:
-            images_out[key] = _ImageFetchFailure(list_error)
+
+        direct_url = _direct_attachment_download_url(base_url, page_id, filename)
+        data, direct_error = _fetch_attachment_bytes(direct_url, token)
+        if data:
+            images_out[key] = data
             continue
+
+        # 직접 조합한 주소가 안 되면 첨부파일 목록에서 받은 공식 다운로드
+        # 링크로 한 번 더 시도한다 - 목록 조회는 필요할 때 한 번만 한다.
+        if attachments is None:
+            attachments, list_error = _fetch_page_attachments(base_url, token, page_id)
 
         download_path = attachments.get(filename)
         if not download_path:
             sample = ", ".join(sorted(attachments)[:5]) or "(이 페이지에 첨부파일 없음)"
-            images_out[key] = _ImageFetchFailure(
-                f"'{filename}'이 이 페이지 첨부파일 목록에 없음 - 목록에 있는 파일 예: {sample}"
+            reason = (
+                f"'{filename}' 직접 주소 실패({direct_error}), "
+                f"이 페이지 첨부파일 목록에 없음 - 목록에 있는 파일 예: {sample}"
             )
+            if list_error:
+                reason += f" (목록 조회 자체도 실패: {list_error})"
+            images_out[key] = _ImageFetchFailure(reason)
             continue
 
-        data, download_error = _fetch_attachment_bytes(base_url, token, download_path)
-        if data:
-            images_out[key] = data
+        list_url = (
+            download_path
+            if download_path.startswith("http")
+            else f"{base_url.rstrip('/')}/{download_path.lstrip('/')}"
+        )
+        data2, list_download_error = _fetch_attachment_bytes(list_url, token)
+        if data2:
+            images_out[key] = data2
         else:
-            images_out[key] = _ImageFetchFailure(f"'{filename}' {download_error}")
+            images_out[key] = _ImageFetchFailure(
+                f"'{filename}' 두 방식 모두 실패 - 직접 주소: {direct_error} / 목록 주소: {list_download_error}"
+            )
 
 
 # ── 연결된 페이지(include/excerpt-include/children) 펼치기 ──────────────
