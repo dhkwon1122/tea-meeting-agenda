@@ -129,13 +129,22 @@ def heading_html(index: int, title: str) -> str:
     )
 
 
-def _include_page_macro(page_title: str) -> str:
-    """같은 제목의 하위 페이지를 현재 위치에 포함시키는 include 매크로."""
+def _include_page_macro(page_title: str, space_key: Optional[str] = None) -> str:
+    """같은 제목의 하위 페이지를 현재 위치에 포함시키는 include 매크로.
+
+    space_key를 안 주면 ri:page에 스페이스를 안 적는데, 그러면 Confluence가
+    "이 매크로가 들어 있는 페이지"의 스페이스에서 제목을 찾는다 - 안건
+    페이지와 상세 페이지가 같은 스페이스라면 문제없지만, 미러 페이지처럼
+    매크로가 들어가는 페이지가 상세 페이지와 다른 스페이스에 있으면 못
+    찾는다(사용자 확인: "미러링 페이지는 안건 페이지와는 다른 스페이스").
+    그래서 상세 페이지가 실제로 있는 스페이스(= 처음 만든 안건 페이지의
+    스페이스)를 명시적으로 적어 둔다."""
+    space_attr = f'ri:space-key="{html.escape(space_key)}" ' if space_key else ""
     return (
         f'<ac:structured-macro ac:name="include" ac:schema-version="1" '
         f'ac:macro-id="{_new_macro_id()}">'
         f'<ac:parameter ac:name="">'
-        f'<ac:link><ri:page ri:content-title="{html.escape(page_title)}"/></ac:link>'
+        f'<ac:link><ri:page {space_attr}ri:content-title="{html.escape(page_title)}"/></ac:link>'
         f"</ac:parameter>"
         f"</ac:structured-macro>"
     )
@@ -204,17 +213,21 @@ def attachment_setup_section_html(
     return layout_section(content)
 
 
-def attachment_section_html(index: int, title: str) -> str:
+def attachment_section_html(index: int, title: str, space_key: Optional[str] = None) -> str:
     """'첨부N' 앵커 + ui-expand 매크로(하위 페이지 include + '(돌아가기)' 링크).
 
     레이아웃 섹션으로 감싸지 않은 조각 하나만 돌려준다 - 모든 안건의 첨부
     블록을 build_agenda_page_body에서 한 섹션에 몰아 담기 위해서다.
+
+    space_key는 _include_page_macro로 그대로 넘어간다(미러 페이지처럼
+    include 매크로가 들어가는 페이지가 상세 페이지와 다른 스페이스에 있을
+    때, 상세 페이지가 실제로 있는 스페이스를 명시하기 위해서다).
     """
     attachment_anchor = f"첨부{index}"
     title_anchor = f"제목{index}"
     expand_title = attachment_page_title(index, title)
 
-    include_html = _include_page_macro(expand_title)
+    include_html = _include_page_macro(expand_title, space_key)
     back_link_html = anchor_link(title_anchor, "(돌아가기)")
 
     ui_expand_html = (
@@ -294,6 +307,7 @@ def build_agenda_page_body(
     template_id: str = DEFAULT_ATTACHMENT_TEMPLATE_ID,
     button_label: str = DEFAULT_ATTACHMENT_BUTTON_LABEL,
     include_setup_section: bool = True,
+    space_key: Optional[str] = None,
 ) -> str:
     """안건 목록을 받아 컨플루언스 에디터에 그대로 붙여넣을 storage-format 소스를 만든다.
 
@@ -304,6 +318,11 @@ def build_agenda_page_body(
     include_setup_section=False면 이 버튼 섹션을 아예 안 넣는다 - API로
     상세 페이지까지 자동으로 만드는 경로(docx_export.create_agenda_page)는
     버튼을 누를 필요가 없으므로 이 섹션이 필요 없다.
+
+    space_key를 주면 첨부 include 매크로에 그 스페이스를 명시한다 - 이
+    본문이 상세 페이지와 다른 스페이스의 페이지(미러 페이지)에도 그대로
+    쓰일 수 있어서, 상세 페이지가 실제로 있는 스페이스를 적어 둬야
+    어디서 쓰이든 올바르게 찾아간다.
     """
     if not items:
         raise ValueError("최소 1개 이상의 안건이 필요합니다.")
@@ -328,7 +347,8 @@ def build_agenda_page_body(
 
     # 2) 첨부 ui-expand 목록: 안건별로 나누지 않고 전부 하나의 레이아웃 섹션에 담는다.
     attachments = "\n".join(
-        attachment_section_html(idx, item.title) for idx, item in enumerate(items, start=1)
+        attachment_section_html(idx, item.title, space_key)
+        for idx, item in enumerate(items, start=1)
     )
     sections.append(layout_section(attachments))
 

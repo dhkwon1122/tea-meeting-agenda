@@ -157,6 +157,20 @@ class BuildAgendaPageBodyTest(unittest.TestCase):
         self.assertIn('ac:name="include"', result)
         self.assertIn('ri:content-title="(첨부 1) 예산 승인"', result)
         self.assertIn("(돌아가기)", result)
+        # space_key를 안 주면 ri:page에 스페이스를 안 적는다(기존 동작 유지).
+        self.assertNotIn("ri:space-key", result)
+
+    def test_space_key_is_baked_into_every_include_macro(self):
+        # 미러 페이지처럼 이 본문이 상세 페이지와 다른 스페이스의 페이지에
+        # 쓰일 수 있어서, 상세 페이지가 실제로 있는 스페이스를 명시해야
+        # 어디서든 올바르게 찾아간다(사용자 확인: "미러링 페이지는 안건
+        # 페이지와는 다른 스페이스").
+        items = [AgendaItem(title="안건1"), AgendaItem(title="안건2")]
+        result = build_agenda_page_body(items, space_key="TEAM")
+
+        self.assertEqual(result.count('ri:space-key="TEAM"'), 2)
+        self.assertIn('ri:space-key="TEAM" ri:content-title="(첨부 1) 안건1"', result)
+        self.assertIn('ri:space-key="TEAM" ri:content-title="(첨부 2) 안건2"', result)
 
     def test_multiple_items_preserve_order_and_numbering(self):
         items = [AgendaItem(title=f"안건{i}") for i in range(1, 4)]

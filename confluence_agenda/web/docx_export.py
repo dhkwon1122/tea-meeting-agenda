@@ -636,9 +636,12 @@ def create_agenda_page(
     mirror_parent_url을 주면, 방금 만든 안건 페이지와 같은 제목/본문으로
     또 다른 상위 페이지 밑에 "미러" 페이지를 하나 더 만든다(사용자 요청:
     "새로 생성한 안건 페이지를 미러링하는 새로운 페이지도 하나 더 생성 -
-    그 페이지의 상위 페이지는 또 다른 페이지"). 본문이 참조하는 include
-    매크로(상세 페이지 링크)는 제목으로 찾으므로 그대로 똑같이 동작한다.
-    미러 페이지 생성이 실패해도 안건 페이지/상세 페이지는 이미 만들어져
+    그 페이지의 상위 페이지는 또 다른 페이지"). 미러 페이지는 안건
+    페이지와 다른 스페이스에 있을 수 있어서(사용자 확인), 본문을 만들 때
+    상세 페이지가 실제로 있는 스페이스(= 안건 페이지의 스페이스)를 include
+    매크로에 명시해 둔다(builder.build_agenda_page_body의 space_key) -
+    그래야 미러 페이지가 다른 스페이스에 있어도 상세 페이지를 그대로
+    찾아간다. 미러 페이지 생성이 실패해도 안건 페이지/상세 페이지는 이미 만들어져
     있으므로 예외를 던지지 않고 결과의 mirror_page에 실패 사유를 담는다.
     """
     say = on_progress or (lambda message: None)
@@ -672,7 +675,9 @@ def create_agenda_page(
         raise RuntimeError(f"상위 페이지 {parent_id}의 스페이스를 확인할 수 없습니다.")
 
     say("안건 페이지 생성 중...")
-    body = build_agenda_page_body(items, intro=intro, include_setup_section=False)
+    body = build_agenda_page_body(
+        items, intro=intro, include_setup_section=False, space_key=space_key
+    )
     agenda_page = _create_page(
         base_url,
         effective_token,

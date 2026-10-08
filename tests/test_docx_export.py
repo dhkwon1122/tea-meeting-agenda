@@ -662,6 +662,10 @@ class CreateAgendaPageTest(unittest.TestCase):
         self.assertEqual(
             mirror_payload["body"]["storage"]["value"], agenda_payload["body"]["storage"]["value"]
         )
+        # 미러 페이지는 안건 페이지와 다른 스페이스(OTHER)에 있으므로, 본문의
+        # include 매크로에는 상세 페이지가 실제로 있는 스페이스(안건 페이지
+        # 쪽 TEAM)를 명시해 둬야 어디서 쓰이든 올바르게 찾아간다.
+        self.assertIn('ri:space-key="TEAM"', agenda_payload["body"]["storage"]["value"])
 
         self.assertEqual(result["mirror_page"], {"ok": True, "title": "회의록", "url": "https://wiki.example.com/x/999"})
 
