@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import html
 import io
+import json
 import os
 import threading
 import uuid
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import List, Optional
 from urllib.parse import quote
 
@@ -309,7 +311,6 @@ PAGE_TEMPLATE = """
           안건 제목을 한 줄씩 입력하세요(대략 10개 내외 권장). 이미 써둔 본문이
           있으면 제목 아래 줄에 이어서 적고, 다음 안건과는 빈 줄로 구분하세요
           — 본문을 안 쓴 안건은 기존처럼 자리표시자로 채워집니다.
-          <a class="back-link" href="/">← 메인으로 돌아가기</a>
         </p>
       </div>
       {% if current_user %}
@@ -376,6 +377,11 @@ PAGE_TEMPLATE = """
         <input type="text" id="page_title" name="page_title" value="{{ page_title }}"
                placeholder="9.21(월) 스탭팀장 미팅 피플팀 안건">
       </div>
+      <div class="field">
+        <label for="mirror_parent_url">미러링 페이지의 상위 페이지 URL</label>
+        <input type="text" id="mirror_parent_url" name="mirror_parent_url" value="{{ mirror_parent_url }}"
+               placeholder="https://wiki.사내주소/pages/viewpage.action?pageId=654321">
+      </div>
     </div>
     {% endif %}
 
@@ -409,6 +415,16 @@ PAGE_TEMPLATE = """
       </li>
       {% endfor %}
     </ul>
+    {% if publish_result.mirror_page %}
+    <p>
+      미러 페이지:
+      {% if publish_result.mirror_page.ok %}
+        ✅ <a href="{{ publish_result.mirror_page.url }}" target="_blank">{{ publish_result.mirror_page.title }}</a>
+      {% else %}
+        ❌ {{ publish_result.mirror_page.title }} - {{ publish_result.mirror_page.error }}
+      {% endif %}
+    </p>
+    {% endif %}
   </div>
   {% endif %}
 
@@ -465,7 +481,6 @@ CONFLUENCE_DOCX_PAGE_TEMPLATE = """
         <h1>Confluence → Word 변환기</h1>
         <p class="subtitle">
           컨플루언스 페이지 URL을 넣으면 .docx로 변환해 바로 받습니다.
-          <a class="back-link" href="/">← 메인으로 돌아가기</a>
         </p>
       </div>
       {% if current_user %}
@@ -656,6 +671,36 @@ def _parse_extra_emails(raw: str) -> List[str]:
     return [part.strip() for chunk in raw.splitlines() for part in chunk.split(",") if part.strip()]
 
 
+# 안건/미러 페이지의 상위 페이지는 거의 매번 똑같은 곳이라서(사용자 확인:
+# "상위 페이지는 거의 고정이야"), 지난번에 성공적으로 만들었을 때 쓴 URL을
+# 그대로 기억해 다음 화면에 기본값으로 채워준다. contacts.json과 같은
+# 방식(파일 기반, 저장소 루트, 환경변수로 경로 재정의 가능)이다.
+_AGENDA_PUBLISH_STATE_PATH = Path(
+    os.environ.get("AGENDA_PUBLISH_STATE_FILE")
+    or Path(__file__).resolve().parent.parent.parent / "agenda_publish_state.json"
+)
+
+
+def _load_last_publish_parents() -> dict:
+    try:
+        raw = json.loads(_AGENDA_PUBLISH_STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _save_last_publish_parents(parent_url: str, mirror_parent_url: str) -> None:
+    try:
+        _AGENDA_PUBLISH_STATE_PATH.write_text(
+            json.dumps(
+                {"parent_url": parent_url, "mirror_parent_url": mirror_parent_url}, ensure_ascii=False
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass  # 기본값 저장에 실패해도 이번 생성 자체는 이미 끝났다 - 조용히 넘어간다.
+
+
 @app.route("/", methods=["GET"])
 def home():
     return render_template_string(
@@ -680,11 +725,16 @@ def agenda_page():
     # 다른 문구가 필요하면 이 칸에서 직접 덮어쓰면 된다.
     default_subject = build_email_subject()
 
+    # 안건/미러 페이지의 상위 페이지는 거의 매번 똑같은 곳이라서, 지난번에
+    # 성공적으로 만들었을 때 쓴 URL을 기본값으로 미리 채워둔다.
+    last_parents = _load_last_publish_parents()
+
     titles_text = ""
     selected_presets: List[str] = []
     extra_to = ""
     subject = default_subject
-    parent_url = ""
+    parent_url = last_parents.get("parent_url", "")
+    mirror_parent_url = last_parents.get("mirror_parent_url", "")
     page_title = ""
     output: Optional[str] = None
     diagram_html: Optional[str] = None
@@ -698,6 +748,7 @@ def agenda_page():
         extra_to = request.form.get("extra_to", "")
         subject = request.form.get("subject", "").strip() or default_subject
         parent_url = request.form.get("parent_url", "").strip()
+        mirror_parent_url = request.form.get("mirror_parent_url", "").strip()
         page_title = request.form.get("page_title", "").strip()
         action = request.form.get("action")
 
@@ -739,6 +790,8 @@ def agenda_page():
                     message, message_ok = "상위 페이지 URL을 입력해주세요.", False
                 elif not page_title:
                     message, message_ok = "새 안건 페이지 제목을 입력해주세요.", False
+                elif not mirror_parent_url:
+                    message, message_ok = "미러링할 페이지의 상위 페이지 URL을 입력해주세요.", False
                 else:
                     current_user = auth.get_current_user()
                     token = resolve_confluence_token(current_user["user_id"] if current_user else None)
@@ -751,8 +804,13 @@ def agenda_page():
                     else:
                         try:
                             publish_result = create_agenda_page(
-                                parent_url, page_title, items, token=token
+                                parent_url,
+                                page_title,
+                                items,
+                                token=token,
+                                mirror_parent_url=mirror_parent_url,
                             )
+                            _save_last_publish_parents(parent_url, mirror_parent_url)
                             message, message_ok = (
                                 f"'{publish_result['title']}' 안건 페이지를 만들었습니다.",
                                 True,
@@ -768,6 +826,7 @@ def agenda_page():
         extra_to=extra_to,
         subject=subject,
         parent_url=parent_url,
+        mirror_parent_url=mirror_parent_url,
         page_title=page_title,
         output=output,
         diagram_html=diagram_html,

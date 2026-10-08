@@ -238,6 +238,20 @@ class WebAppTest(unittest.TestCase):
 
         self.assertIn("새 안건 페이지 제목을 입력해주세요".encode(), resp.data)
 
+    def test_publish_confluence_without_mirror_parent_url_shows_error(self):
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=True):
+            resp = self.client.post(
+                "/agenda",
+                data={
+                    "titles": "안건1",
+                    "action": "publish_confluence",
+                    "parent_url": "https://wiki.example.com/pages/100",
+                    "page_title": "회의록",
+                },
+            )
+
+        self.assertIn("미러링할 페이지의 상위 페이지 URL을 입력해주세요".encode(), resp.data)
+
     def test_publish_confluence_without_token_shows_error(self):
         with mock.patch(
             "confluence_agenda.web.app.docx_export_configured", return_value=True
@@ -249,6 +263,7 @@ class WebAppTest(unittest.TestCase):
                     "action": "publish_confluence",
                     "parent_url": "https://wiki.example.com/pages/100",
                     "page_title": "회의록",
+                    "mirror_parent_url": "https://wiki.example.com/pages/900",
                 },
             )
 
@@ -263,6 +278,7 @@ class WebAppTest(unittest.TestCase):
                 {"title": "(첨부 1) 안건1", "ok": True, "url": "https://wiki.example.com/x/300"},
                 {"title": "(첨부 2) 안건2", "ok": False, "error": "이미 같은 제목의 페이지가 있습니다."},
             ],
+            "mirror_page": {"ok": True, "title": "회의록", "url": "https://wiki.example.com/x/999"},
         }
         with mock.patch(
             "confluence_agenda.web.app.docx_export_configured", return_value=True
@@ -270,7 +286,9 @@ class WebAppTest(unittest.TestCase):
             "confluence_agenda.web.app.resolve_confluence_token", return_value="my-pat"
         ), mock.patch(
             "confluence_agenda.web.app.create_agenda_page", return_value=fake_result
-        ) as fake_create:
+        ) as fake_create, mock.patch(
+            "confluence_agenda.web.app._save_last_publish_parents"
+        ) as fake_save:
             resp = self.client.post(
                 "/agenda",
                 data={
@@ -278,6 +296,7 @@ class WebAppTest(unittest.TestCase):
                     "action": "publish_confluence",
                     "parent_url": "https://wiki.example.com/pages/100",
                     "page_title": "회의록",
+                    "mirror_parent_url": "https://wiki.example.com/pages/900",
                 },
             )
 
@@ -286,12 +305,18 @@ class WebAppTest(unittest.TestCase):
         self.assertEqual(args[0], "https://wiki.example.com/pages/100")
         self.assertEqual(args[1], "회의록")
         self.assertEqual(kwargs["token"], "my-pat")
+        self.assertEqual(kwargs["mirror_parent_url"], "https://wiki.example.com/pages/900")
+        # 다음에 또 쓸 수 있게 이번에 쓴 상위 페이지 URL들을 기본값으로 저장해야 한다.
+        fake_save.assert_called_once_with(
+            "https://wiki.example.com/pages/100", "https://wiki.example.com/pages/900"
+        )
 
         body = resp.data.decode("utf-8")
         self.assertIn("회의록", body)
         self.assertIn("https://wiki.example.com/x/200", body)
         self.assertIn("https://wiki.example.com/x/300", body)
         self.assertIn("이미 같은 제목의 페이지가 있습니다", body)
+        self.assertIn("https://wiki.example.com/x/999", body)
 
     def test_publish_confluence_failure_shows_error_message(self):
         with mock.patch(
@@ -309,11 +334,28 @@ class WebAppTest(unittest.TestCase):
                     "action": "publish_confluence",
                     "parent_url": "https://wiki.example.com/pages/1",
                     "page_title": "회의록",
+                    "mirror_parent_url": "https://wiki.example.com/pages/900",
                 },
             )
 
         self.assertIn("안건 페이지 생성 실패".encode(), resp.data)
         self.assertIn("찾을 수 없습니다".encode(), resp.data)
+
+    def test_agenda_page_prefills_parent_urls_from_last_successful_publish(self):
+        # 상위 페이지는 거의 고정이라, 지난번에 쓴 URL이 기본값으로 미리
+        # 채워져 있어야 한다(사용자 요청).
+        saved = {
+            "parent_url": "https://wiki.example.com/pages/100",
+            "mirror_parent_url": "https://wiki.example.com/pages/900",
+        }
+        with mock.patch(
+            "confluence_agenda.web.app.docx_export_configured", return_value=True
+        ), mock.patch("confluence_agenda.web.app._load_last_publish_parents", return_value=saved):
+            resp = self.client.get("/agenda")
+
+        body = resp.data.decode("utf-8")
+        self.assertIn('value="https://wiki.example.com/pages/100"', body)
+        self.assertIn('value="https://wiki.example.com/pages/900"', body)
 
     def test_publish_confluence_does_not_show_manual_copy_paste_source_card(self):
         # API로 이미 다 만들었는데 "소스 생성" 카드가 같이 뜨면, 템플릿
@@ -324,12 +366,15 @@ class WebAppTest(unittest.TestCase):
             "url": "https://wiki.example.com/x/200",
             "title": "회의록",
             "detail_pages": [],
+            "mirror_page": None,
         }
         with mock.patch(
             "confluence_agenda.web.app.docx_export_configured", return_value=True
         ), mock.patch(
             "confluence_agenda.web.app.resolve_confluence_token", return_value="my-pat"
-        ), mock.patch("confluence_agenda.web.app.create_agenda_page", return_value=fake_result):
+        ), mock.patch(
+            "confluence_agenda.web.app.create_agenda_page", return_value=fake_result
+        ), mock.patch("confluence_agenda.web.app._save_last_publish_parents"):
             resp = self.client.post(
                 "/agenda",
                 data={
@@ -337,6 +382,7 @@ class WebAppTest(unittest.TestCase):
                     "action": "publish_confluence",
                     "parent_url": "https://wiki.example.com/pages/100",
                     "page_title": "회의록",
+                    "mirror_parent_url": "https://wiki.example.com/pages/900",
                 },
             )
 

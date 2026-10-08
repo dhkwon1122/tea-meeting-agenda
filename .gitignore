@@ -11,3 +11,7 @@ certs/*.pem
 # 웹 UI 수신자 태그 목록(이름/이메일 개인정보) - contacts.example.json 참고
 contacts.json
 
+# 안건 페이지 생성 시 지난번에 쓴 상위 페이지 URL(사내 Confluence 주소라
+# 커밋하지 않음) - app.py의 _AGENDA_PUBLISH_STATE_PATH가 쓰고 읽는다.
+agenda_publish_state.json
+

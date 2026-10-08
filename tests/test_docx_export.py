@@ -575,6 +575,7 @@ class CreateAgendaPageTest(unittest.TestCase):
             result["detail_pages"][0]["url"],
             "https://wiki.example.com/pages/viewpage.action?pageId=302",
         )
+        self.assertIsNone(result["mirror_page"])
         self.assertTrue(progress)
 
     def test_one_failed_detail_page_does_not_block_the_others_or_the_agenda_page(self):
@@ -607,6 +608,97 @@ class CreateAgendaPageTest(unittest.TestCase):
         self.assertTrue(result["detail_pages"][1]["ok"])
         # 상세 페이지 하나가 실패해도 안건 페이지 자체는 이미 만들어져 있어야 한다.
         self.assertEqual(result["page_id"], "200")
+
+    def test_mirror_parent_url_creates_a_copy_under_a_different_parent(self):
+        # 새로 만든 안건 페이지와 같은 제목/본문으로, 또 다른 상위 페이지
+        # 밑에 "미러" 페이지를 하나 더 만들어야 한다(사용자 요청).
+        items = [AgendaItem(title="안건1")]
+
+        def fake_get(url, **kwargs):
+            if url.endswith("/rest/api/content/100"):
+                return _fake_response(json_data={"id": "100", "space": {"key": "TEAM"}})
+            if url.endswith("/rest/api/content/900"):
+                return _fake_response(json_data={"id": "900", "space": {"key": "OTHER"}})
+            raise AssertionError(f"unexpected GET: {url}")
+
+        def fake_post(url, **kwargs):
+            payload = kwargs["json"]
+            if payload["title"] == "회의록" and payload["ancestors"] == [{"id": "100"}]:
+                return _fake_response(
+                    json_data={"id": "200", "title": "회의록", "_links": {"webui": "/x/200"}}
+                )
+            if payload["title"] == "회의록" and payload["ancestors"] == [{"id": "900"}]:
+                return _fake_response(
+                    json_data={"id": "999", "title": "회의록", "_links": {"webui": "/x/999"}}
+                )
+            return _fake_response(
+                json_data={"id": "301", "title": payload["title"], "_links": {"webui": "/x/301"}}
+            )
+
+        with mock.patch("requests.get", side_effect=fake_get), mock.patch(
+            "requests.post", side_effect=fake_post
+        ) as mocked_post:
+            result = create_agenda_page(
+                "https://wiki.example.com/pages/100",
+                "회의록",
+                items,
+                mirror_parent_url="https://wiki.example.com/pages/900",
+            )
+
+        mirror_payload = next(
+            call.kwargs["json"]
+            for call in mocked_post.call_args_list
+            if call.kwargs["json"]["ancestors"] == [{"id": "900"}]
+        )
+        self.assertEqual(mirror_payload["title"], "회의록")
+        self.assertEqual(mirror_payload["space"], {"key": "OTHER"})
+        # 미러 페이지 본문은 원본 안건 페이지와 똑같아야(같은 include
+        # 매크로로 같은 상세 페이지를 그대로 찾아갈 수 있어야) 한다.
+        agenda_payload = next(
+            call.kwargs["json"]
+            for call in mocked_post.call_args_list
+            if call.kwargs["json"]["ancestors"] == [{"id": "100"}]
+        )
+        self.assertEqual(
+            mirror_payload["body"]["storage"]["value"], agenda_payload["body"]["storage"]["value"]
+        )
+
+        self.assertEqual(result["mirror_page"], {"ok": True, "title": "회의록", "url": "https://wiki.example.com/x/999"})
+
+    def test_mirror_page_failure_does_not_affect_agenda_or_detail_pages(self):
+        items = [AgendaItem(title="안건1")]
+
+        def fake_get(url, **kwargs):
+            if url.endswith("/rest/api/content/100"):
+                return _fake_response(json_data={"id": "100", "space": {"key": "TEAM"}})
+            if url.endswith("/rest/api/content/900"):
+                return _fake_response(status_code=404)
+            raise AssertionError(f"unexpected GET: {url}")
+
+        def fake_post(url, **kwargs):
+            payload = kwargs["json"]
+            if payload["title"] == "회의록":
+                return _fake_response(
+                    json_data={"id": "200", "title": "회의록", "_links": {"webui": "/x/200"}}
+                )
+            return _fake_response(
+                json_data={"id": "301", "title": payload["title"], "_links": {"webui": "/x/301"}}
+            )
+
+        with mock.patch("requests.get", side_effect=fake_get), mock.patch(
+            "requests.post", side_effect=fake_post
+        ):
+            result = create_agenda_page(
+                "https://wiki.example.com/pages/100",
+                "회의록",
+                items,
+                mirror_parent_url="https://wiki.example.com/pages/900",
+            )
+
+        self.assertEqual(result["page_id"], "200")
+        self.assertTrue(result["detail_pages"][0]["ok"])
+        self.assertFalse(result["mirror_page"]["ok"])
+        self.assertIn("찾을 수 없습니다", result["mirror_page"]["error"])
 
 
 class RenderedDocxContentTest(unittest.TestCase):

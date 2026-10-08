@@ -614,6 +614,7 @@ def create_agenda_page(
     *,
     token: Optional[str] = None,
     intro: Optional[str] = None,
+    mirror_parent_url: Optional[str] = None,
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> dict:
     """안건 페이지를 parent_url 하위에 실제로 만들고, 안건별 상세 페이지도
@@ -631,6 +632,14 @@ def create_agenda_page(
     전체가 롤백되면 사용자가 더 혼란스럽다. 어떤 안건이 실패했는지, 왜
     실패했는지는 반환값의 detail_pages에 그대로 담겨서 화면에 보여줄 수
     있다.
+
+    mirror_parent_url을 주면, 방금 만든 안건 페이지와 같은 제목/본문으로
+    또 다른 상위 페이지 밑에 "미러" 페이지를 하나 더 만든다(사용자 요청:
+    "새로 생성한 안건 페이지를 미러링하는 새로운 페이지도 하나 더 생성 -
+    그 페이지의 상위 페이지는 또 다른 페이지"). 본문이 참조하는 include
+    매크로(상세 페이지 링크)는 제목으로 찾으므로 그대로 똑같이 동작한다.
+    미러 페이지 생성이 실패해도 안건 페이지/상세 페이지는 이미 만들어져
+    있으므로 예외를 던지지 않고 결과의 mirror_page에 실패 사유를 담는다.
     """
     say = on_progress or (lambda message: None)
 
@@ -693,12 +702,38 @@ def create_agenda_page(
         except Exception as exc:  # noqa: BLE001 - 하나 실패해도 나머지는 계속 만든다
             detail_pages.append({"title": detail_title, "ok": False, "error": str(exc)})
 
+    mirror_page: Optional[dict] = None
+    if mirror_parent_url:
+        say("미러 페이지 생성 중...")
+        try:
+            mirror_parent_id = _page_id_from_url(mirror_parent_url)
+            if mirror_parent_id is None:
+                raise RuntimeError(
+                    f"미러 페이지의 상위 페이지 URL에서 페이지 ID를 못 찾았습니다: {mirror_parent_url}"
+                )
+            mirror_parent_page = _fetch_page(base_url, mirror_parent_id, effective_token)
+            mirror_space_key = (mirror_parent_page.get("space") or {}).get("key")
+            if not mirror_space_key:
+                raise RuntimeError(f"미러 상위 페이지 {mirror_parent_id}의 스페이스를 확인할 수 없습니다.")
+            mirror = _create_page(
+                base_url,
+                effective_token,
+                space_key=mirror_space_key,
+                parent_id=mirror_parent_id,
+                title=title,
+                body_storage=body,
+            )
+            mirror_page = {"ok": True, "title": title, "url": _page_browser_url(base_url, mirror)}
+        except Exception as exc:  # noqa: BLE001 - 미러 실패해도 안건/상세 페이지는 이미 만들어졌다
+            mirror_page = {"ok": False, "title": title, "error": str(exc)}
+
     say("완료")
     return {
         "page_id": agenda_page_id,
         "url": _page_browser_url(base_url, agenda_page),
         "title": agenda_page.get("title", title),
         "detail_pages": detail_pages,
+        "mirror_page": mirror_page,
     }
 
 
