@@ -1193,19 +1193,26 @@ _HEADING_FOLD_BASE = 2  # h2가 첫 단계(depth 0)가 된다 - h1은 문서/쪽
 
 _LEVEL_SYMBOL_ALIASES = {
     "□": ["■", "◻", "ㅁ"],
-    "-": ["–", "—"],
-    "·": ["ㆍ", "ᆞ", "‧", "∙", "•"],
 }
+# "-"와 "·"는 원문에 "이미 쳐 있는 말머리"로는 인식하지 않는다(사용자
+# 피드백: "-나 점 문자가 말머릿기호로 인식되는 거 같은데 그렇게 안 되게
+# 할 수 있어?") - 이 두 문자는 평문 안에서도 흔히 쓰여서(이어주는 기호,
+# 소수점, 강조용 대시 등) 문단이 우연히 이 문자로 시작하기만 해도 목록
+# 항목으로 오인식되는 경우가 실제로 있었다. "□"는 그런 오탐 위험이
+# 낮아서 그대로 둔다. 말머리가 없는 항목에 우리가 새로 매기는 번호로는
+# "-"/"·"를 여전히 쓴다(_NUMBERING_LEVELS, _format_marker) - 이건 원문
+# 인식과 무관한 별개 경로라 영향받지 않는다.
+_RECOGNIZED_EXISTING_MARKER_SYMBOLS = {"□"}
 _LEVEL_SYMBOL_TO_DEPTH: dict = {}
 for _depth, _level in enumerate(_NUMBERING_LEVELS):
-    if "{n}" not in _level:
+    if _level in _RECOGNIZED_EXISTING_MARKER_SYMBOLS:
         _LEVEL_SYMBOL_TO_DEPTH[_level] = _depth
 for _marker, _aliases in _LEVEL_SYMBOL_ALIASES.items():
     for _alias in _aliases:
         _LEVEL_SYMBOL_TO_DEPTH[_alias] = _LEVEL_SYMBOL_TO_DEPTH[_marker]
 
 # 원문에 이미 쳐 있는 말머리 인식: "1." "1)" "(1)" 숫자 번호, "가." "나)" 한글
-# 번호, "□"/"-"/"·" 계열 기호(그 변형 포함). doc2report의 leading_markers 중
+# 번호, "□" 계열 기호(그 변형 포함). doc2report의 leading_markers 중
 # ①~⑳/※ 등은 범위를 줄여 뺐다.
 _EXISTING_NUMBER_RE = re.compile(r"^\s*(?:\(\d{1,2}\)|\d{1,2}(?:\.\d{1,2})*[.)])(?!\d)\s*")
 _HANGUL_ENUM_RE = re.compile(

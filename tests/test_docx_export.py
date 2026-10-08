@@ -1024,6 +1024,27 @@ class StructuralFoldTest(unittest.TestCase):
         self.assertIn("1.\t추진 배경", texts)
         self.assertNotIn("1.\t1. 추진 배경", texts)
 
+    def test_hyphen_prefixed_plain_text_is_not_mistaken_for_a_marker(self):
+        # "-"로 시작하는 평범한 문장(강조용 대시 등)이 목록 말머리로
+        # 오인식되면 안 된다(사용자 피드백: "-나 점 문자가 말머릿기호로
+        # 인식되는 거 같은데 그렇게 안 되게 할 수 있어?") - 그대로 평문단
+        # 텍스트여야 한다("-\t" 같은 탭이 끼어들면 안 됨).
+        data = self._convert("<p>- 전사 매출은 전년 대비 10% 증가했습니다.</p>")
+        texts = _docx_paragraph_texts(data)
+        self.assertIn("- 전사 매출은 전년 대비 10% 증가했습니다.", texts)
+
+    def test_dot_prefixed_plain_text_is_not_mistaken_for_a_marker(self):
+        data = self._convert("<p>· 참고 자료는 첨부 파일을 확인하세요.</p>")
+        texts = _docx_paragraph_texts(data)
+        self.assertIn("· 참고 자료는 첨부 파일을 확인하세요.", texts)
+
+    def test_box_symbol_prefixed_text_is_still_recognized_as_an_existing_marker(self):
+        # "□"는 평문에 흔히 나오지 않아 오탐 위험이 낮으므로, 기존 말머리
+        # 인식 대상에서 빼지 않는다(회귀 방지).
+        data = self._convert("<p>□ 세부 항목입니다.</p>")
+        texts = _docx_paragraph_texts(data)
+        self.assertIn("□\t세부 항목입니다.", texts)
+
     def test_nested_list_depth_follows_heading_then_restarts_sibling_counter(self):
         data = self._convert("<ul><li>A<ul><li>A-1</li></ul></li><li>B</li></ul>")
         texts = _docx_paragraph_texts(data)
