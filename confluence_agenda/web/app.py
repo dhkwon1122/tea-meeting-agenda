@@ -301,7 +301,7 @@ PAGE_TEMPLATE = """
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Confluence 안건 보고 소스 생성기</title>
+<title>Confluence 안건 페이지 생성기</title>
 <style>""" + _APP_STYLE + """</style>
 </head>
 <body>
@@ -309,7 +309,7 @@ PAGE_TEMPLATE = """
   <header>
     <div class="header-row">
       <div>
-        <h1>Confluence 안건 보고 소스 생성기</h1>
+        <h1>Confluence 안건 페이지 생성기</h1>
         <p class="subtitle">
           안건 제목을 한 줄씩 입력하세요(대략 10개 내외 권장). 이미 써둔 본문이
           있으면 제목 아래 줄에 이어서 적고, 다음 안건과는 빈 줄로 구분하세요
@@ -364,6 +364,11 @@ PAGE_TEMPLATE = """
     {% if mail_configured %}
     <div class="card">
       <h2>메일 발송</h2>
+      <p class="subtitle" style="margin:0 0 16px;">
+        "Confluence에 자동 생성"이 안 되는 경우(권한/네트워크 등)에는
+        "소스 생성"으로 본문을 만들고 이 메일 발송으로 받는 사람에게
+        보내서, 직접 Confluence 편집기에 붙여넣게 해주세요.
+      </p>
       <div class="field">
         <label>받는 사람</label>
         <div class="chip-group">
@@ -1308,7 +1313,7 @@ LOGIN_PAGE_TEMPLATE = """
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>로그인 - Confluence 안건 보고 소스 생성기</title>
+<title>로그인 - Confluence 안건 페이지 생성기</title>
 <style>
   :root { --blue: #1a73e8; --blue-dark: #1765cc; --text: #202124; --text-muted: #5f6368;
           --border: #dadce0; --surface: #ffffff; --bg: #f8f9fa; --error-bg: #fce8e6; --error-text: #c5221f; }

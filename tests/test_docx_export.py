@@ -467,6 +467,30 @@ class ConvertConfluenceUrlToDocxHttpTest(unittest.TestCase):
         self.assertEqual(filename, "테스트 문서.docx")
 
 
+class PageBrowserUrlTest(unittest.TestCase):
+    """생성/수정된 페이지의 클릭 가능한 링크는 API 호출 기준 주소
+    (CONFLUENCE_URL, 사내 게이트웨이 주소일 수 있음)가 아니라 실제로 열어볼
+    수 있는 공개 Confluence 주소를 써야 한다(사용자 확인: "생성된 페이지의
+    url 안내는 api 호출하는 base url이 아니라
+    https://confluence.samsungds.net 을 base url로 해야 할 거 같아")."""
+
+    def test_defaults_to_samsungds_domain_regardless_of_api_base_url(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            url = docx_export._page_browser_url(
+                {"_links": {"webui": "/pages/viewpage.action?pageId=123"}}
+            )
+        self.assertEqual(url, "https://confluence.samsungds.net/pages/viewpage.action?pageId=123")
+
+    def test_overridable_via_env_var(self):
+        with mock.patch.dict(
+            os.environ, {"CONFLUENCE_BROWSER_BASE_URL": "https://wiki.other.example.com"}, clear=True
+        ):
+            url = docx_export._page_browser_url(
+                {"_links": {"webui": "/pages/viewpage.action?pageId=123"}}
+            )
+        self.assertEqual(url, "https://wiki.other.example.com/pages/viewpage.action?pageId=123")
+
+
 class CreateAgendaPageTest(unittest.TestCase):
     """create_agenda_page - 안건 페이지를 API로 직접 만들고, 안건별 상세
     페이지도 그 하위 페이지로 자동 생성하는 기능(지금까지는 "템플릿에서
@@ -570,13 +594,19 @@ class CreateAgendaPageTest(unittest.TestCase):
         )
 
         self.assertEqual(result["page_id"], "200")
-        self.assertEqual(result["url"], "https://wiki.example.com/pages/viewpage.action?pageId=200")
+        # 생성된 페이지 링크는 API 호출 기준 주소(CONFLUENCE_URL)가 아니라
+        # 사용자가 실제로 열어볼 수 있는 공개 주소를 써야 한다(사용자
+        # 확인: "api 호출하는 base url이 아니라 https://confluence.
+        # samsungds.net 을 base url로 해야 할 거 같아").
+        self.assertEqual(
+            result["url"], "https://confluence.samsungds.net/pages/viewpage.action?pageId=200"
+        )
         self.assertEqual(len(result["detail_pages"]), 2)
         self.assertTrue(all(d["ok"] for d in result["detail_pages"]))
         self.assertEqual(result["detail_pages"][0]["title"], "(첨부 1) 예산안 승인")
         self.assertEqual(
             result["detail_pages"][0]["url"],
-            "https://wiki.example.com/pages/viewpage.action?pageId=302",
+            "https://confluence.samsungds.net/pages/viewpage.action?pageId=302",
         )
         self.assertIsNone(result["mirror_page"])
         self.assertTrue(progress)
@@ -668,7 +698,10 @@ class CreateAgendaPageTest(unittest.TestCase):
         # 페이지가 실제로 있는 스페이스(TEAM)를 명시해야 올바르게 찾아간다.
         self.assertIn('ri:space-key="TEAM" ri:content-title="회의록"', mirror_body)
 
-        self.assertEqual(result["mirror_page"], {"ok": True, "title": "회의록", "url": "https://wiki.example.com/x/999"})
+        self.assertEqual(
+            result["mirror_page"],
+            {"ok": True, "title": "회의록", "url": "https://confluence.samsungds.net/x/999"},
+        )
 
     def test_mirror_page_failure_does_not_affect_agenda_or_detail_pages(self):
         items = [AgendaItem(title="안건1")]

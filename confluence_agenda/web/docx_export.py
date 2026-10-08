@@ -576,10 +576,28 @@ def _fetch_child_pages(base_url: str, token: str, page_id: str) -> List[dict]:
     return resp.json().get("results") or []
 
 
-def _page_browser_url(base_url: str, page: dict) -> str:
+_DEFAULT_CONFLUENCE_BROWSER_BASE_URL = "https://confluence.samsungds.net"
+
+
+def _browser_base_url() -> str:
+    """사용자에게 보여줄/클릭할 링크를 만들 때 쓰는 기준 주소.
+
+    API 호출에 쓰는 CONFLUENCE_URL(사내 게이트웨이 주소일 수 있음)과는
+    다를 수 있다(사용자 확인: "생성된 페이지의 url 안내는 api 호출하는
+    base url이 아니라 https://confluence.samsungds.net 을 base url로
+    해야 할 거 같아") - 실제 브라우저로 열어볼 수 있는 공개 Confluence
+    주소를 따로 쓴다. CONFLUENCE_BROWSER_BASE_URL 환경변수로 바꿀 수
+    있다."""
+    url = os.environ.get("CONFLUENCE_BROWSER_BASE_URL", "").strip()
+    return _normalize_base_url(url) if url else _DEFAULT_CONFLUENCE_BROWSER_BASE_URL
+
+
+def _page_browser_url(page: dict) -> str:
     """페이지 생성 응답(_links.webui, 사이트 루트 기준 상대경로)으로 바로
     열어볼 수 있는 주소를 만든다 - _links.webui가 없으면(이론상 거의 없지만)
-    pageId 기반 옛 주소 형태로 대신한다."""
+    pageId 기반 옛 주소 형태로 대신한다. API 호출 기준 주소가 아니라
+    _browser_base_url()을 쓴다(위 설명 참고)."""
+    base_url = _browser_base_url()
     webui = (page.get("_links") or {}).get("webui")
     if webui:
         return f"{base_url}{webui}"
@@ -887,11 +905,11 @@ def update_agenda_page(
                         title=detail_title,
                     )
                     detail_results.append(
-                        {"title": detail_title, "ok": True, "url": _page_browser_url(base_url, renamed)}
+                        {"title": detail_title, "ok": True, "url": _page_browser_url(renamed)}
                     )
                 else:
                     detail_results.append(
-                        {"title": detail_title, "ok": True, "url": _page_browser_url(base_url, existing)}
+                        {"title": detail_title, "ok": True, "url": _page_browser_url(existing)}
                     )
             else:
                 created = _create_page(
@@ -903,7 +921,7 @@ def update_agenda_page(
                     body_storage=DEFAULT_DETAIL_PAGE_BODY_HTML,
                 )
                 detail_results.append(
-                    {"title": detail_title, "ok": True, "url": _page_browser_url(base_url, created)}
+                    {"title": detail_title, "ok": True, "url": _page_browser_url(created)}
                 )
         except Exception as exc:  # noqa: BLE001 - 하나 실패해도 나머지는 계속 처리한다
             detail_results.append({"title": detail_title, "ok": False, "error": str(exc)})
@@ -923,7 +941,7 @@ def update_agenda_page(
     say("완료")
     return {
         "page_id": page_id,
-        "url": _page_browser_url(base_url, updated_page),
+        "url": _page_browser_url(updated_page),
         "title": updated_page.get("title", page.get("title")),
         "detail_pages": detail_results,
         "trashed_detail_pages": trashed_results,
@@ -1025,7 +1043,7 @@ def create_agenda_page(
                 body_storage=DEFAULT_DETAIL_PAGE_BODY_HTML,
             )
             detail_pages.append(
-                {"title": detail_title, "ok": True, "url": _page_browser_url(base_url, detail_page)}
+                {"title": detail_title, "ok": True, "url": _page_browser_url(detail_page)}
             )
         except Exception as exc:  # noqa: BLE001 - 하나 실패해도 나머지는 계속 만든다
             detail_pages.append({"title": detail_title, "ok": False, "error": str(exc)})
@@ -1051,14 +1069,14 @@ def create_agenda_page(
                 title=title,
                 body_storage=mirror_page_body_html(title, space_key),
             )
-            mirror_page = {"ok": True, "title": title, "url": _page_browser_url(base_url, mirror)}
+            mirror_page = {"ok": True, "title": title, "url": _page_browser_url(mirror)}
         except Exception as exc:  # noqa: BLE001 - 미러 실패해도 안건/상세 페이지는 이미 만들어졌다
             mirror_page = {"ok": False, "title": title, "error": str(exc)}
 
     say("완료")
     return {
         "page_id": agenda_page_id,
-        "url": _page_browser_url(base_url, agenda_page),
+        "url": _page_browser_url(agenda_page),
         "title": agenda_page.get("title", title),
         "detail_pages": detail_pages,
         "mirror_page": mirror_page,
