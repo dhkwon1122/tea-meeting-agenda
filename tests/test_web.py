@@ -216,6 +216,30 @@ class WebAppTest(unittest.TestCase):
         self.assertIn(b'name="parent_url"', resp.data)
         self.assertIn(b'value="publish_confluence"', resp.data)
 
+    def test_publish_confluence_card_appears_above_mail_card(self):
+        env = {"MAIL_API_TOKEN": "t", "MAIL_API_SYSTEM_ID": "s", "MAIL_API_USER_ID": "u"}
+        with mock.patch.dict("os.environ", env, clear=True), mock.patch(
+            "confluence_agenda.web.app.docx_export_configured", return_value=True
+        ):
+            resp = self.client.get("/agenda")
+
+        body = resp.data.decode("utf-8")
+        self.assertLess(body.index("Confluence에 자동 생성"), body.index("메일 발송"))
+
+    def test_publish_confluence_button_is_leftmost_and_blue(self):
+        env = {"MAIL_API_TOKEN": "t", "MAIL_API_SYSTEM_ID": "s", "MAIL_API_USER_ID": "u"}
+        with mock.patch.dict("os.environ", env, clear=True), mock.patch(
+            "confluence_agenda.web.app.docx_export_configured", return_value=True
+        ):
+            resp = self.client.get("/agenda")
+
+        body = resp.data.decode("utf-8")
+        self.assertIn('class="primary" type="submit" name="action" value="publish_confluence"', body)
+        self.assertIn('class="secondary" type="submit" name="action" value="generate"', body)
+        self.assertIn('class="secondary" type="submit" name="action" value="send_mail"', body)
+        self.assertLess(body.index('value="publish_confluence"'), body.index('value="generate"'))
+        self.assertLess(body.index('value="generate"'), body.index('value="send_mail"'))
+
     def test_publish_confluence_without_parent_url_shows_error(self):
         with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=True):
             resp = self.client.post(

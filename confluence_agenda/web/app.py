@@ -332,6 +332,32 @@ PAGE_TEMPLATE = """
       </div>
     </div>
 
+    {% if docx_export_configured %}
+    <div class="card">
+      <h2>Confluence에 자동 생성</h2>
+      <p class="subtitle" style="margin:0 0 16px;">
+        위 안건으로 새 안건 페이지를 만들고, 안건별 상세 페이지도 그 하위
+        페이지로 한 번에 만듭니다 - "템플릿에서 페이지 만들기" 버튼을 안건
+        수만큼 손으로 누를 필요가 없어집니다.
+      </p>
+      <div class="field">
+        <label for="parent_url">상위 페이지 URL</label>
+        <input type="text" id="parent_url" name="parent_url" value="{{ parent_url }}"
+               placeholder="https://wiki.사내주소/pages/viewpage.action?pageId=123456">
+      </div>
+      <div class="field">
+        <label for="page_title">새 안건 페이지 제목</label>
+        <input type="text" id="page_title" name="page_title" value="{{ page_title }}"
+               placeholder="9.21(월) 스탭팀장 미팅 피플팀 안건">
+      </div>
+      <div class="field">
+        <label for="mirror_parent_url">미러링 페이지의 상위 페이지 URL</label>
+        <input type="text" id="mirror_parent_url" name="mirror_parent_url" value="{{ mirror_parent_url }}"
+               placeholder="https://wiki.사내주소/pages/viewpage.action?pageId=654321">
+      </div>
+    </div>
+    {% endif %}
+
     {% if mail_configured %}
     <div class="card">
       <h2>메일 발송</h2>
@@ -359,39 +385,13 @@ PAGE_TEMPLATE = """
     </div>
     {% endif %}
 
-    {% if docx_export_configured %}
-    <div class="card">
-      <h2>Confluence에 자동 생성</h2>
-      <p class="subtitle" style="margin:0 0 16px;">
-        위 안건으로 새 안건 페이지를 만들고, 안건별 상세 페이지도 그 하위
-        페이지로 한 번에 만듭니다 - "템플릿에서 페이지 만들기" 버튼을 안건
-        수만큼 손으로 누를 필요가 없어집니다.
-      </p>
-      <div class="field">
-        <label for="parent_url">상위 페이지 URL</label>
-        <input type="text" id="parent_url" name="parent_url" value="{{ parent_url }}"
-               placeholder="https://wiki.사내주소/pages/viewpage.action?pageId=123456">
-      </div>
-      <div class="field">
-        <label for="page_title">새 안건 페이지 제목</label>
-        <input type="text" id="page_title" name="page_title" value="{{ page_title }}"
-               placeholder="9.21(월) 스탭팀장 미팅 피플팀 안건">
-      </div>
-      <div class="field">
-        <label for="mirror_parent_url">미러링 페이지의 상위 페이지 URL</label>
-        <input type="text" id="mirror_parent_url" name="mirror_parent_url" value="{{ mirror_parent_url }}"
-               placeholder="https://wiki.사내주소/pages/viewpage.action?pageId=654321">
-      </div>
-    </div>
-    {% endif %}
-
     <div class="actions">
-      <button class="primary" type="submit" name="action" value="generate">소스 생성</button>
+      {% if docx_export_configured %}
+      <button class="primary" type="submit" name="action" value="publish_confluence">Confluence에 자동 생성</button>
+      {% endif %}
+      <button class="secondary" type="submit" name="action" value="generate">소스 생성</button>
       {% if mail_configured %}
       <button class="secondary" type="submit" name="action" value="send_mail">메일로 보내기</button>
-      {% endif %}
-      {% if docx_export_configured %}
-      <button class="secondary" type="submit" name="action" value="publish_confluence">Confluence에 자동 생성</button>
       {% endif %}
     </div>
   </form>
