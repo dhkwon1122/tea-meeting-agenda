@@ -20,7 +20,7 @@ import threading
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from urllib.parse import quote
 
 from flask import Flask, redirect, render_template_string, request, send_file
@@ -39,7 +39,9 @@ from .docx_export import DocxExportUnavailable, convert_confluence_url_to_docx, 
 from .docx_export import diagnose_connection as diagnose_confluence_connection
 from .docx_export import docx_bytes_to_preview_html
 from .docx_export import is_feature_available as docx_export_configured
+from .docx_export import load_agenda_page_for_editing
 from .docx_export import resolve_token as resolve_confluence_token
+from .docx_export import update_agenda_page
 from .docx_export import verify_token as verify_confluence_token
 
 app = Flask(__name__)
@@ -243,6 +245,7 @@ _TOP_NAV_HTML = """
   <div class="nav-row">
     <a class="nav-link {{ 'active' if active_nav == 'agenda' else '' }}" href="/agenda">📝 안건 페이지 생성</a>
     {% if docx_export_configured %}
+    <a class="nav-link {{ 'active' if active_nav == 'agenda_edit' else '' }}" href="/agenda/edit">✏️ 안건 수정</a>
     <a class="nav-link {{ 'active' if active_nav == 'docx' else '' }}" href="/confluence-to-docx">📄 워드 파일 변환</a>
     {% endif %}
   </div>
@@ -458,6 +461,130 @@ PAGE_TEMPLATE = """
       navigator.clipboard.writeText(ta.value).then(function () {
         alert('복사되었습니다. Confluence 편집기 "마크업 삽입"에 붙여넣으세요.');
       });
+    }
+  </script>
+</body>
+</html>
+"""
+
+AGENDA_EDIT_PAGE_TEMPLATE = """
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>안건 수정</title>
+<style>""" + _APP_STYLE + """</style>
+</head>
+<body>
+<div class="page">""" + _TOP_NAV_HTML + """
+  <header>
+    <div class="header-row">
+      <div>
+        <h1>안건 수정</h1>
+        <p class="subtitle">
+          이미 만든 안건 페이지의 URL을 넣어 불러온 뒤, 제목을 고치거나
+          추가/삭제하고 저장하세요.
+        </p>
+      </div>
+      {% if current_user %}
+      <div class="user-info">{{ current_user.display_name }}님<a href="/logout">로그아웃</a></div>
+      {% endif %}
+    </div>
+  </header>
+
+  {% if message %}
+    <div class="message {{ 'ok' if message_ok else 'error' }}">{{ message }}</div>
+  {% endif %}
+
+  <form method="post">
+    <div class="card">
+      <h2>안건 페이지</h2>
+      <div class="field">
+        <label for="page_url">안건 페이지 URL</label>
+        <input type="text" id="page_url" name="page_url" value="{{ page_url }}"
+               placeholder="https://wiki.사내주소/pages/viewpage.action?pageId=123456">
+      </div>
+      <button class="secondary" type="submit" name="action" value="load">불러오기</button>
+    </div>
+
+    {% if loaded %}
+    <div class="card">
+      <h2>{{ loaded.title }}</h2>
+      <p class="subtitle" style="margin:0 0 16px;">
+        제목을 고치거나 "삭제"를 체크한 뒤 저장하세요. 아래 빈 칸에 제목을
+        쓰면 새 안건으로 추가됩니다. 삭제된 항목의 상세 페이지는 완전
+        삭제가 아니라 휴지통으로 이동합니다(복구 가능).
+      </p>
+      <div id="agenda-existing-rows">
+        {% for item in loaded['items'] %}
+        <div class="field" style="display:flex; gap:8px; align-items:center;">
+          <input type="hidden" name="orig_index" value="{{ item.index }}">
+          <input type="text" name="title" value="{{ item.title }}" style="flex:1;">
+          <label style="display:flex; align-items:center; gap:4px; white-space:nowrap; font-size:0.85rem; color:var(--text-muted);">
+            <input type="checkbox" name="delete_orig_index" value="{{ item.index }}"> 삭제
+          </label>
+        </div>
+        {% endfor %}
+      </div>
+      <div id="agenda-new-rows">
+        {% for _ in range(3) %}
+        <div class="field" style="display:flex; gap:8px; align-items:center;">
+          <input type="hidden" name="orig_index" value="">
+          <input type="text" name="title" value="" placeholder="새 안건 제목" style="flex:1;">
+        </div>
+        {% endfor %}
+      </div>
+      <button class="secondary" type="button" onclick="addAgendaRow()">+ 항목 추가</button>
+      <div class="actions" style="margin-top:16px;">
+        <button class="primary" type="submit" name="action" value="save">저장</button>
+      </div>
+    </div>
+    {% endif %}
+  </form>
+
+  {% if save_result %}
+  <div class="card">
+    <h2>저장 결과</h2>
+    <p>
+      <a class="btn-primary" href="{{ save_result.url }}" target="_blank">
+        {{ save_result.title }} 열기
+      </a>
+    </p>
+    <ul>
+      {% for detail in save_result.detail_pages %}
+      <li>
+        {% if detail.ok %}
+          ✅ <a href="{{ detail.url }}" target="_blank">{{ detail.title }}</a>
+        {% else %}
+          ❌ {{ detail.title }} - {{ detail.error }}
+        {% endif %}
+      </li>
+      {% endfor %}
+      {% for trashed in save_result.trashed_detail_pages %}
+      <li>
+        {% if trashed.ok %}
+          🗑️ {{ trashed.title }} - 휴지통으로 이동했습니다
+        {% else %}
+          ❌ {{ trashed.title }} - 휴지통으로 이동 실패: {{ trashed.error }}
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+</div>
+
+  <script>
+    function addAgendaRow() {
+      var container = document.getElementById('agenda-new-rows');
+      var row = document.createElement('div');
+      row.className = 'field';
+      row.style.cssText = 'display:flex; gap:8px; align-items:center;';
+      row.innerHTML =
+        '<input type="hidden" name="orig_index" value="">' +
+        '<input type="text" name="title" value="" placeholder="새 안건 제목" style="flex:1;">';
+      container.appendChild(row);
     }
   </script>
 </body>
@@ -837,6 +964,96 @@ def agenda_page():
         docx_export_configured=docx_export_configured(),
         current_user=auth.get_current_user(),
         active_nav="agenda",
+    )
+
+
+@app.route("/agenda/edit", methods=["GET", "POST"])
+def agenda_edit_page():
+    if not docx_export_configured():
+        return redirect("/")
+
+    page_url = ""
+    loaded: Optional[dict] = None
+    save_result: Optional[dict] = None
+    message: Optional[str] = None
+    message_ok = True
+
+    if request.method == "POST":
+        action = request.form.get("action")
+        page_url = request.form.get("page_url", "").strip()
+        current_user = auth.get_current_user()
+        token = resolve_confluence_token(current_user["user_id"] if current_user else None)
+
+        if action == "load":
+            if not page_url:
+                message, message_ok = "안건 페이지 URL을 입력해주세요.", False
+            elif not token:
+                message, message_ok = (
+                    "Confluence 개인 액세스 토큰(PAT)이 없습니다. "
+                    "워드 변환기 화면에서 내 PAT을 등록해주세요.",
+                    False,
+                )
+            else:
+                try:
+                    loaded = load_agenda_page_for_editing(page_url, token=token)
+                    message, message_ok = f"'{loaded['title']}' 안건 페이지를 불러왔습니다.", True
+                except Exception as e:
+                    message, message_ok = f"안건 페이지를 불러오지 못했습니다: {e}", False
+
+        elif action == "save":
+            orig_indexes_raw = request.form.getlist("orig_index")
+            titles = request.form.getlist("title")
+            deleted_orig_indexes = {
+                int(raw) for raw in request.form.getlist("delete_orig_index") if raw
+            }
+
+            items: List[Tuple[Optional[int], str]] = []
+            for orig_raw, title in zip(orig_indexes_raw, titles):
+                title = title.strip()
+                orig_index = int(orig_raw) if orig_raw else None
+                if orig_index is not None and orig_index in deleted_orig_indexes:
+                    continue  # 삭제 표시된 기존 항목은 최종 목록에서 뺀다.
+                if not title:
+                    continue  # 제목 없는 새 빈 칸은 무시한다.
+                items.append((orig_index, title))
+
+            if not page_url:
+                message, message_ok = "안건 페이지 URL을 입력해주세요.", False
+            elif not items:
+                message, message_ok = "최소 1개 이상의 안건이 필요합니다.", False
+            elif not token:
+                message, message_ok = (
+                    "Confluence 개인 액세스 토큰(PAT)이 없습니다. "
+                    "워드 변환기 화면에서 내 PAT을 등록해주세요.",
+                    False,
+                )
+            else:
+                try:
+                    save_result = update_agenda_page(
+                        page_url,
+                        items,
+                        deleted_orig_indexes=list(deleted_orig_indexes),
+                        token=token,
+                    )
+                    message, message_ok = (
+                        f"'{save_result['title']}' 안건 페이지를 수정했습니다.",
+                        True,
+                    )
+                    # 저장 직후 최신 상태를 다시 불러와 보여준다(바로 또 고칠 수 있게).
+                    loaded = load_agenda_page_for_editing(page_url, token=token)
+                except Exception as e:
+                    message, message_ok = f"안건 페이지 수정 실패: {e}", False
+
+    return render_template_string(
+        AGENDA_EDIT_PAGE_TEMPLATE,
+        page_url=page_url,
+        loaded=loaded,
+        save_result=save_result,
+        message=message,
+        message_ok=message_ok,
+        docx_export_configured=docx_export_configured(),
+        current_user=auth.get_current_user(),
+        active_nav="agenda_edit",
     )
 
 

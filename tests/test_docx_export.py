@@ -10,7 +10,7 @@ from docx import Document as DocxDocument
 from docx.oxml.ns import qn
 from docx.shared import Mm, Pt
 
-from confluence_agenda.builder import AgendaItem
+from confluence_agenda.builder import AgendaItem, build_agenda_page_body
 from confluence_agenda.web import confluence_credentials, docx_export
 from confluence_agenda.web.docx_export import (
     DocxExportUnavailable,
@@ -19,7 +19,10 @@ from confluence_agenda.web.docx_export import (
     diagnose_connection,
     docx_bytes_to_preview_html,
     is_feature_available,
+    load_agenda_page_for_editing,
+    parse_agenda_page_items,
     resolve_token,
+    update_agenda_page,
     verify_token,
 )
 
@@ -701,6 +704,310 @@ class CreateAgendaPageTest(unittest.TestCase):
         self.assertTrue(result["detail_pages"][0]["ok"])
         self.assertFalse(result["mirror_page"]["ok"])
         self.assertIn("찾을 수 없습니다", result["mirror_page"]["error"])
+
+
+class ParseAgendaPageItemsTest(unittest.TestCase):
+    """build_agenda_page_body가 만든 본문을 다시 읽어 안건 목록으로 되돌리는
+    parse_agenda_page_items - 안건 추가/수정/삭제 화면이 현재 상태를
+    보여주는 데 쓴다."""
+
+    def test_round_trips_titles_and_preserves_existing_body(self):
+        items = [
+            AgendaItem(title="예산안 승인"),
+            AgendaItem(title="채용 계획", body="이미 쓴 본문 내용"),
+        ]
+        body = build_agenda_page_body(items, include_setup_section=False)
+
+        parsed = parse_agenda_page_items(body)
+
+        self.assertEqual(set(parsed), {1, 2})
+        self.assertEqual(parsed[1].title, "예산안 승인")
+        self.assertEqual(parsed[2].title, "채용 계획")
+        self.assertIn("이미 쓴 본문 내용", parsed[2].body)
+
+    def test_serialized_body_has_no_redundant_namespace_declarations(self):
+        # etree.tostring()으로 트리에서 떼어낸 조각을 그대로 쓰면 각 자식마다
+        # xmlns:ac/xmlns:ri가 중복으로 붙는다 - 다시 Confluence로 보낼
+        # 본문에 섞이면 안 된다.
+        items = [AgendaItem(title="안건1", body="본문")]
+        body = build_agenda_page_body(items, include_setup_section=False)
+
+        parsed = parse_agenda_page_items(body)
+
+        self.assertNotIn("xmlns:ac", parsed[1].body)
+        self.assertNotIn("xmlns:ri", parsed[1].body)
+
+
+class LoadAgendaPageForEditingTest(unittest.TestCase):
+    def setUp(self):
+        self._env_patch = mock.patch.dict(
+            os.environ,
+            {"CONFLUENCE_URL": "https://wiki.example.com", "CONFLUENCE_API_TOKEN": "t"},
+            clear=True,
+        )
+        self._env_patch.start()
+        self.addCleanup(self._env_patch.stop)
+
+    def test_returns_ordered_items_with_titles(self):
+        items = [AgendaItem(title="안건A"), AgendaItem(title="안건B")]
+        body = build_agenda_page_body(items, include_setup_section=False)
+        resp = _fake_response(
+            json_data={
+                "id": "200",
+                "title": "회의록",
+                "body": {"storage": {"value": body}},
+            }
+        )
+        with mock.patch("requests.get", return_value=resp):
+            result = load_agenda_page_for_editing("https://wiki.example.com/pages/200")
+
+        self.assertEqual(result["page_id"], "200")
+        self.assertEqual(result["title"], "회의록")
+        self.assertEqual(
+            result["items"], [{"index": 1, "title": "안건A"}, {"index": 2, "title": "안건B"}]
+        )
+
+    def test_raises_when_no_agenda_items_found(self):
+        resp = _fake_response(
+            json_data={"id": "200", "title": "빈 문서", "body": {"storage": {"value": "<p>내용 없음</p>"}}}
+        )
+        with mock.patch("requests.get", return_value=resp):
+            with self.assertRaisesRegex(RuntimeError, "안건 항목을 찾을 수 없습니다"):
+                load_agenda_page_for_editing("https://wiki.example.com/pages/200")
+
+    def test_raises_unavailable_when_no_token(self):
+        with mock.patch.dict(os.environ, {"CONFLUENCE_URL": "https://wiki.example.com"}, clear=True):
+            with self.assertRaisesRegex(DocxExportUnavailable, "PAT"):
+                load_agenda_page_for_editing("https://wiki.example.com/pages/200")
+
+
+class UpdateAgendaPageTest(unittest.TestCase):
+    """update_agenda_page - 안건 추가/수정/삭제 화면이 실제로 Confluence에
+    반영하는 핵심 함수."""
+
+    def setUp(self):
+        self._env_patch = mock.patch.dict(
+            os.environ,
+            {"CONFLUENCE_URL": "https://wiki.example.com", "CONFLUENCE_API_TOKEN": "t"},
+            clear=True,
+        )
+        self._env_patch.start()
+        self.addCleanup(self._env_patch.stop)
+
+        existing_items = [
+            AgendaItem(title="안건A"),
+            AgendaItem(title="안건B"),
+            AgendaItem(title="안건C"),
+        ]
+        self.existing_body = build_agenda_page_body(existing_items, include_setup_section=False)
+
+    def _page_resp(self, version=3):
+        return _fake_response(
+            json_data={
+                "id": "200",
+                "title": "회의록",
+                "space": {"key": "TEAM"},
+                "version": {"number": version},
+                "body": {"storage": {"value": self.existing_body}},
+            }
+        )
+
+    def _children_resp(self):
+        return _fake_response(
+            json_data={
+                "results": [
+                    {"id": "301", "title": "(첨부 1) 안건A", "version": {"number": 1}},
+                    {"id": "302", "title": "(첨부 2) 안건B", "version": {"number": 1}},
+                    {"id": "303", "title": "(첨부 3) 안건C", "version": {"number": 1}},
+                ]
+            }
+        )
+
+    def test_renumbers_detail_pages_when_an_earlier_item_is_removed(self):
+        # 안건B(2번)를 지우면, 안건C는 제목이 안 바뀌었어도 번호가
+        # 3->2로 밀리므로 그 상세 페이지 제목도 "(첨부 2) 안건C"로
+        # 바뀌어야 한다.
+        page_resp = self._page_resp()
+        children_resp = self._children_resp()
+
+        def fake_get(url, **kwargs):
+            if url.endswith("/rest/api/content/200"):
+                return page_resp
+            if url.endswith("/rest/api/content/200/child/page"):
+                return children_resp
+            raise AssertionError(f"unexpected GET: {url}")
+
+        put_calls = []
+
+        def fake_put(url, **kwargs):
+            payload = kwargs["json"]
+            put_calls.append(payload)
+            return _fake_response(
+                json_data={**payload, "_links": {"webui": f"/x/{payload['id']}"}}
+            )
+
+        delete_calls = []
+
+        def fake_delete(url, **kwargs):
+            delete_calls.append(url)
+            return _fake_response(status_code=204)
+
+        with mock.patch("requests.get", side_effect=fake_get), mock.patch(
+            "requests.put", side_effect=fake_put
+        ), mock.patch("requests.delete", side_effect=fake_delete):
+            result = update_agenda_page(
+                "https://wiki.example.com/pages/200",
+                items=[(1, "안건A"), (3, "안건C")],
+                deleted_orig_indexes=[2],
+            )
+
+        agenda_put = next(p for p in put_calls if p["id"] == "200")
+        self.assertEqual(agenda_put["version"], {"number": 4})
+        self.assertIn("(첨부 1) 안건A", agenda_put["body"]["storage"]["value"])
+        self.assertIn("(첨부 2) 안건C", agenda_put["body"]["storage"]["value"])
+        self.assertNotIn("안건B", agenda_put["body"]["storage"]["value"])
+
+        rename_put = next(p for p in put_calls if p["id"] == "303")
+        self.assertEqual(rename_put["title"], "(첨부 2) 안건C")
+        self.assertEqual(rename_put["version"], {"number": 2})
+
+        self.assertEqual(delete_calls, ["https://wiki.example.com/rest/api/content/302"])
+        self.assertEqual(result["trashed_detail_pages"], [{"title": "(첨부 2) 안건B", "ok": True}])
+        self.assertTrue(all(d["ok"] for d in result["detail_pages"]))
+
+    def test_new_item_gets_a_detail_page_with_default_body(self):
+        page_resp = self._page_resp()
+        children_resp = self._children_resp()
+
+        def fake_get(url, **kwargs):
+            if url.endswith("/rest/api/content/200"):
+                return page_resp
+            if url.endswith("/rest/api/content/200/child/page"):
+                return children_resp
+            raise AssertionError(f"unexpected GET: {url}")
+
+        def fake_put(url, **kwargs):
+            payload = kwargs["json"]
+            return _fake_response(json_data={**payload, "_links": {"webui": f"/x/{payload['id']}"}})
+
+        created = []
+
+        def fake_post(url, **kwargs):
+            payload = kwargs["json"]
+            created.append(payload)
+            return _fake_response(
+                json_data={"id": "304", "title": payload["title"], "_links": {"webui": "/x/304"}}
+            )
+
+        with mock.patch("requests.get", side_effect=fake_get), mock.patch(
+            "requests.put", side_effect=fake_put
+        ), mock.patch("requests.post", side_effect=fake_post):
+            result = update_agenda_page(
+                "https://wiki.example.com/pages/200",
+                items=[(1, "안건A"), (2, "안건B"), (3, "안건C"), (None, "새 안건")],
+            )
+
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0]["title"], "(첨부 4) 새 안건")
+        self.assertEqual(
+            created[0]["body"]["storage"]["value"], docx_export.DEFAULT_DETAIL_PAGE_BODY_HTML
+        )
+        self.assertEqual(created[0]["ancestors"], [{"id": "200"}])
+        self.assertTrue(result["detail_pages"][-1]["ok"])
+
+    def test_renaming_a_kept_item_renames_its_detail_page(self):
+        page_resp = self._page_resp()
+        children_resp = self._children_resp()
+
+        def fake_get(url, **kwargs):
+            if url.endswith("/rest/api/content/200"):
+                return page_resp
+            if url.endswith("/rest/api/content/200/child/page"):
+                return children_resp
+            raise AssertionError(f"unexpected GET: {url}")
+
+        put_calls = []
+
+        def fake_put(url, **kwargs):
+            payload = kwargs["json"]
+            put_calls.append(payload)
+            return _fake_response(json_data={**payload, "_links": {"webui": f"/x/{payload['id']}"}})
+
+        with mock.patch("requests.get", side_effect=fake_get), mock.patch(
+            "requests.put", side_effect=fake_put
+        ):
+            update_agenda_page(
+                "https://wiki.example.com/pages/200",
+                items=[(1, "안건A-수정됨"), (2, "안건B"), (3, "안건C")],
+            )
+
+        rename_put = next(p for p in put_calls if p["id"] == "301")
+        self.assertEqual(rename_put["title"], "(첨부 1) 안건A-수정됨")
+
+    def test_kept_item_with_unchanged_title_and_position_is_not_renamed(self):
+        page_resp = self._page_resp()
+        children_resp = self._children_resp()
+
+        def fake_get(url, **kwargs):
+            if url.endswith("/rest/api/content/200"):
+                return page_resp
+            if url.endswith("/rest/api/content/200/child/page"):
+                return children_resp
+            raise AssertionError(f"unexpected GET: {url}")
+
+        put_calls = []
+
+        def fake_put(url, **kwargs):
+            payload = kwargs["json"]
+            put_calls.append(payload["id"])
+            return _fake_response(json_data={**payload, "_links": {"webui": f"/x/{payload['id']}"}})
+
+        with mock.patch("requests.get", side_effect=fake_get), mock.patch(
+            "requests.put", side_effect=fake_put
+        ):
+            update_agenda_page(
+                "https://wiki.example.com/pages/200",
+                items=[(1, "안건A"), (2, "안건B"), (3, "안건C")],
+            )
+
+        # 안건 페이지 본문만 갱신되고, 번호/제목이 안 바뀐 상세 페이지들은
+        # 불필요하게 PUT하지 않아야 한다.
+        self.assertEqual(put_calls, ["200"])
+
+    def test_one_detail_page_rename_failure_does_not_block_the_others(self):
+        page_resp = self._page_resp()
+        children_resp = self._children_resp()
+
+        def fake_get(url, **kwargs):
+            if url.endswith("/rest/api/content/200"):
+                return page_resp
+            if url.endswith("/rest/api/content/200/child/page"):
+                return children_resp
+            raise AssertionError(f"unexpected GET: {url}")
+
+        def fake_put(url, **kwargs):
+            payload = kwargs["json"]
+            if payload["id"] == "301":
+                return _fake_response(status_code=409, text="버전 충돌")
+            return _fake_response(json_data={**payload, "_links": {"webui": f"/x/{payload['id']}"}})
+
+        with mock.patch("requests.get", side_effect=fake_get), mock.patch(
+            "requests.put", side_effect=fake_put
+        ):
+            result = update_agenda_page(
+                "https://wiki.example.com/pages/200",
+                items=[(1, "안건A-수정"), (2, "안건B-수정")],
+                deleted_orig_indexes=[3],
+            )
+
+        by_title = {d["title"]: d for d in result["detail_pages"]}
+        self.assertFalse(by_title["(첨부 1) 안건A-수정"]["ok"])
+        self.assertIn("HTTP 409", by_title["(첨부 1) 안건A-수정"]["error"])
+        self.assertTrue(by_title["(첨부 2) 안건B-수정"]["ok"])
+
+    def test_raises_when_no_items_given(self):
+        with self.assertRaisesRegex(ValueError, "최소 1개"):
+            update_agenda_page("https://wiki.example.com/pages/200", items=[])
 
 
 class RenderedDocxContentTest(unittest.TestCase):

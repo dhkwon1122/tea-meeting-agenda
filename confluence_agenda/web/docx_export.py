@@ -109,7 +109,7 @@ import os
 import re
 from io import BytesIO
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import requests
@@ -553,11 +553,13 @@ def _find_page_by_title(base_url: str, token: str, title: str, space: Optional[s
 
 def _fetch_child_pages(base_url: str, token: str, page_id: str) -> List[dict]:
     """children 매크로가 가리키는 하위 페이지 목록(doc2report의
-    LinkedPages._children()과 같은 엔드포인트)."""
+    LinkedPages._children()과 같은 엔드포인트). version도 같이 받아온다 -
+    안건 추가/수정/삭제 화면이 상세 페이지 이름을 바꿀 때 현재 버전
+    번호가 필요해서(안 받아오면 또 한 번 조회해야 함)."""
     try:
         resp = requests.get(
             f"{base_url}/rest/api/content/{page_id}/child/page",
-            params={"limit": 200, "expand": "body.storage,space"},
+            params={"limit": 200, "expand": "body.storage,space,version"},
             headers=_request_headers(token),
             timeout=30,
             verify=_ssl_verify(),
@@ -606,6 +608,322 @@ def _create_page(
     if resp.status_code not in (200, 201):
         raise RuntimeError(f"'{title}' 페이지 생성 실패(HTTP {resp.status_code}): {resp.text[:300]}")
     return resp.json()
+
+
+def _update_page(
+    base_url: str,
+    token: str,
+    *,
+    page_id: str,
+    space_key: str,
+    version: int,
+    title: str,
+    body_storage: Optional[str] = None,
+) -> dict:
+    """페이지를 수정한다(PUT /rest/api/content/{id}) - version은 현재 버전
+    + 1이어야 한다(Confluence가 버전 불일치면 거절한다). body_storage를
+    안 주면 본문은 그대로 두고 제목만 바꾼다(상세 페이지 번호/제목만
+    맞출 때 쓴다 - 안건 추가/수정/삭제 화면)."""
+    payload = {
+        "id": page_id,
+        "type": "page",
+        "title": title,
+        "space": {"key": space_key},
+        "version": {"number": version},
+    }
+    if body_storage is not None:
+        payload["body"] = {"storage": {"value": body_storage, "representation": "storage"}}
+    try:
+        resp = requests.put(
+            f"{base_url}/rest/api/content/{page_id}",
+            json=payload,
+            headers=_request_headers(token),
+            timeout=30,
+            verify=_ssl_verify(),
+            proxies=_proxies(),
+        )
+    except (requests.RequestException, OSError) as exc:
+        raise _wrap_connection_error(exc) from exc
+    if resp.status_code not in (200, 201):
+        raise RuntimeError(f"'{title}' 페이지 수정 실패(HTTP {resp.status_code}): {resp.text[:300]}")
+    return resp.json()
+
+
+def _trash_page(base_url: str, token: str, page_id: str) -> None:
+    """페이지를 휴지통으로 보낸다(DELETE /rest/api/content/{id}) - 완전
+    삭제가 아니라 복구 가능한 상태로 남긴다(사용자 확인: "휴지통으로
+    보낸다" - Confluence 기본 동작이 바로 이거라 같은 엔드포인트를 그냥
+    한 번 호출하면 된다. 영구 삭제는 휴지통에서 같은 엔드포인트를 한
+    번 더 호출해야 하는데, 이 함수는 그렇게 하지 않는다)."""
+    try:
+        resp = requests.delete(
+            f"{base_url}/rest/api/content/{page_id}",
+            headers=_request_headers(token),
+            timeout=30,
+            verify=_ssl_verify(),
+            proxies=_proxies(),
+        )
+    except (requests.RequestException, OSError) as exc:
+        raise _wrap_connection_error(exc) from exc
+    if resp.status_code not in (200, 204):
+        raise RuntimeError(f"페이지 {page_id} 삭제(휴지통 이동) 실패(HTTP {resp.status_code}): {resp.text[:300]}")
+
+
+_DETAIL_TITLE_INDEX_RE = re.compile(r"^\(첨부\s*(\d+)\)\s")
+
+
+def _fetch_detail_pages_by_index(base_url: str, token: str, agenda_page_id: str) -> Dict[int, dict]:
+    """안건 페이지의 하위 페이지 중 "(첨부 N) ..." 제목 패턴을 가진 것만
+    번호로 찾아 돌려준다 - 안건 추가/수정/삭제 화면이 기존 상세 페이지를
+    다시 찾아 이름을 바꾸거나 휴지통으로 보낼 때 쓴다."""
+    children = _fetch_child_pages(base_url, token, agenda_page_id)
+    result: Dict[int, dict] = {}
+    for child in children:
+        match = _DETAIL_TITLE_INDEX_RE.match(child.get("title") or "")
+        if match:
+            result[int(match.group(1))] = child
+    return result
+
+
+_ITEM_HEADING_RE = re.compile(r"^\s*(\d+)\.\s*(.*)$")
+
+# etree.tostring()으로 원본 트리에서 떨어져 나온 자식 하나씩 직렬화하면,
+# lxml이 그 자식이 속했던 조상(_parse_storage가 감싼 <root>)의 xmlns:ac/
+# xmlns:ri 선언을 모른 채 매번 중복으로 다시 붙인다 - 내용 자체에는 영향
+#없지만 보기에도 안 좋고 다시 Confluence로 보낼 본문에 불필요한 속성이
+# 섞이는 걸 피하려고 지운다.
+_REDUNDANT_NS_DECL_RE = re.compile(
+    rf'\s+xmlns:ac="{re.escape(_AC_NS)}"|\s+xmlns:ri="{re.escape(_RI_NS)}"'
+)
+
+
+def _is_blank_storage_paragraph(element: etree._Element) -> bool:
+    return _local(element.tag) == "p" and not "".join(element.itertext()).strip()
+
+
+def parse_agenda_page_items(storage_html: str) -> Dict[int, AgendaItem]:
+    """이미 만든 안건 페이지의 본문(storage XHTML)을 읽어 번호 -> AgendaItem
+    맵으로 되돌린다(제목과 원래 본문을 그대로 보존) - 안건 추가/수정/삭제
+    화면이 현재 상태를 보여주고, 수정 시 안 바뀐 항목의 본문을 그대로
+    유지하는 데 쓴다.
+
+    builder.build_agenda_page_body가 만드는 모양(레이아웃 섹션 하나에
+    제목 h3 + 여백 문단 + 본문 + 여백 문단)을 그대로 되돌리는 것이라,
+    이 함수로 만들지 않았거나 그 뒤 구조를 크게 손으로 고친 페이지는
+    완벽히 복원되지 않을 수 있다."""
+    root = _parse_storage(storage_html)
+    items: Dict[int, AgendaItem] = {}
+    for section in root.iter():
+        if _local(section.tag) != "layout-section":
+            continue
+        cell = next((c for c in section if _local(c.tag) == "layout-cell"), None)
+        if cell is None:
+            continue
+        children = list(cell)
+        if not children or _local(children[0].tag) != "h3":
+            continue
+        span = children[0].find(".//span")
+        if span is None or not span.text:
+            continue
+        match = _ITEM_HEADING_RE.match(span.text)
+        if not match:
+            continue
+        index = int(match.group(1))
+        title = match.group(2).strip()
+
+        rest = children[1:]
+        if rest and _is_blank_storage_paragraph(rest[0]):
+            rest = rest[1:]
+        if rest and _is_blank_storage_paragraph(rest[-1]):
+            rest = rest[:-1]
+        body = "\n".join(etree.tostring(child, encoding="unicode") for child in rest)
+        body = _REDUNDANT_NS_DECL_RE.sub("", body)
+        items[index] = AgendaItem(title=title, body=body, raw_body=True)
+    return items
+
+
+def load_agenda_page_for_editing(page_url: str, *, token: Optional[str] = None) -> dict:
+    """안건 추가/수정/삭제 화면에 보여줄, 이미 만든 안건 페이지의 현재
+    상태(제목 목록)를 읽어온다."""
+    if not is_url_configured():
+        raise DocxExportUnavailable(
+            "CONFLUENCE_URL 환경변수가 설정되지 않았습니다. .env.example을 참고해 설정해주세요."
+        )
+    effective_token = token or os.environ.get("CONFLUENCE_API_TOKEN", "").strip()
+    if not effective_token:
+        raise DocxExportUnavailable(
+            "Confluence 개인 액세스 토큰(PAT)이 없습니다. 화면에서 내 PAT을 등록하거나, "
+            "관리자가 CONFLUENCE_API_TOKEN 환경변수를 설정해야 합니다."
+        )
+
+    page_id = _page_id_from_url(page_url)
+    if page_id is None:
+        raise RuntimeError(
+            f"안건 페이지 URL에서 페이지 ID를 못 찾았습니다: {page_url}\n"
+            "'/pages/123456', '?pageId=123456' 형태이거나 페이지 ID 숫자 자체여야 합니다."
+        )
+
+    base_url = _normalize_base_url(os.environ.get("CONFLUENCE_URL", "").strip())
+    page = _fetch_page(base_url, page_id, effective_token)
+    storage_html = (page.get("body") or {}).get("storage", {}).get("value") or ""
+    items = parse_agenda_page_items(storage_html)
+    if not items:
+        raise RuntimeError(
+            "이 페이지에서 안건 항목을 찾을 수 없습니다 - "
+            "'Confluence에 자동 생성'으로 만든 안건 페이지가 맞는지 확인하세요."
+        )
+    return {
+        "page_id": page_id,
+        "url": page_url,
+        "title": page.get("title") or "",
+        "items": [{"index": idx, "title": items[idx].title} for idx in sorted(items)],
+    }
+
+
+def update_agenda_page(
+    page_url: str,
+    items: List[Tuple[Optional[int], str]],
+    *,
+    deleted_orig_indexes: Optional[List[int]] = None,
+    token: Optional[str] = None,
+    on_progress: Optional[Callable[[str], None]] = None,
+) -> dict:
+    """이미 만든 안건 페이지를 다시 읽어, items(최종 순서의 (원래 번호 또는
+    None, 제목) 목록)에 맞게 본문을 고치고 상세 페이지를 맞춘다 - 지금까지는
+    한 번 만든 안건 페이지에 안건이 추가/수정/삭제되면 손으로 고쳐야 했다.
+
+    - 유지된 항목(원래 번호가 있음)은 본문은 그대로 두고 제목/번호만 맞춰
+      상세 페이지 제목을 바꾼다 - 앞에서 다른 항목이 추가/삭제되면 번호가
+      밀릴 수 있어서, 제목이 안 바뀌었어도 번호가 달라졌으면 상세 페이지
+      제목을 다시 맞춘다.
+    - 새 항목(원래 번호가 없음)은 create_agenda_page와 같은 기본 본문
+      (DEFAULT_DETAIL_PAGE_BODY_HTML)으로 상세 페이지를 새로 만든다.
+    - deleted_orig_indexes로 지정한 번호의 상세 페이지는 휴지통으로
+      보낸다(사용자 확인: "휴지통으로 보낸다" - 복구 가능하게 완전
+      삭제는 하지 않는다).
+
+    상세 페이지 하나가 실패해도(생성/이름변경/삭제 전부) 나머지는 계속
+    처리한다 - 안건 페이지 본문은 이미 갱신됐는데 상세 페이지 하나
+    실패로 나머지까지 멈추면 더 혼란스럽다."""
+    say = on_progress or (lambda message: None)
+    deleted_orig_indexes = deleted_orig_indexes or []
+
+    if not is_url_configured():
+        raise DocxExportUnavailable(
+            "CONFLUENCE_URL 환경변수가 설정되지 않았습니다. .env.example을 참고해 설정해주세요."
+        )
+    effective_token = token or os.environ.get("CONFLUENCE_API_TOKEN", "").strip()
+    if not effective_token:
+        raise DocxExportUnavailable(
+            "Confluence 개인 액세스 토큰(PAT)이 없습니다. 화면에서 내 PAT을 등록하거나, "
+            "관리자가 CONFLUENCE_API_TOKEN 환경변수를 설정해야 합니다."
+        )
+    if not items:
+        raise ValueError("최소 1개 이상의 안건이 필요합니다.")
+
+    page_id = _page_id_from_url(page_url)
+    if page_id is None:
+        raise RuntimeError(
+            f"안건 페이지 URL에서 페이지 ID를 못 찾았습니다: {page_url}\n"
+            "'/pages/123456', '?pageId=123456' 형태이거나 페이지 ID 숫자 자체여야 합니다."
+        )
+
+    base_url = _normalize_base_url(os.environ.get("CONFLUENCE_URL", "").strip())
+
+    say("안건 페이지 조회 중...")
+    page = _fetch_page(base_url, page_id, effective_token)
+    space_key = (page.get("space") or {}).get("key")
+    if not space_key:
+        raise RuntimeError(f"안건 페이지 {page_id}의 스페이스를 확인할 수 없습니다.")
+    current_version = (page.get("version") or {}).get("number")
+    if not current_version:
+        raise RuntimeError(f"안건 페이지 {page_id}의 버전 정보를 확인할 수 없습니다.")
+    storage_html = (page.get("body") or {}).get("storage", {}).get("value") or ""
+    current_items = parse_agenda_page_items(storage_html)
+
+    say("상세 페이지 목록 확인 중...")
+    detail_pages = _fetch_detail_pages_by_index(base_url, effective_token, page_id)
+
+    new_agenda_items: List[AgendaItem] = []
+    for orig_index, title in items:
+        if orig_index is not None and orig_index in current_items:
+            new_agenda_items.append(
+                AgendaItem(title=title, body=current_items[orig_index].body, raw_body=True)
+            )
+        else:
+            new_agenda_items.append(AgendaItem(title=title))
+
+    say("안건 페이지 본문 갱신 중...")
+    new_body = build_agenda_page_body(new_agenda_items, include_setup_section=False)
+    updated_page = _update_page(
+        base_url,
+        effective_token,
+        page_id=page_id,
+        space_key=space_key,
+        version=current_version + 1,
+        title=page.get("title") or "",
+        body_storage=new_body,
+    )
+
+    detail_results: List[dict] = []
+    for new_index, (orig_index, title) in enumerate(items, start=1):
+        detail_title = attachment_page_title(new_index, title)
+        say(f"상세 페이지 반영 중... ({new_index}/{len(items)}) {detail_title}")
+        existing = detail_pages.get(orig_index) if orig_index is not None else None
+        try:
+            if existing is not None:
+                if existing.get("title") != detail_title:
+                    existing_version = (existing.get("version") or {}).get("number", 1)
+                    renamed = _update_page(
+                        base_url,
+                        effective_token,
+                        page_id=existing["id"],
+                        space_key=space_key,
+                        version=existing_version + 1,
+                        title=detail_title,
+                    )
+                    detail_results.append(
+                        {"title": detail_title, "ok": True, "url": _page_browser_url(base_url, renamed)}
+                    )
+                else:
+                    detail_results.append(
+                        {"title": detail_title, "ok": True, "url": _page_browser_url(base_url, existing)}
+                    )
+            else:
+                created = _create_page(
+                    base_url,
+                    effective_token,
+                    space_key=space_key,
+                    parent_id=page_id,
+                    title=detail_title,
+                    body_storage=DEFAULT_DETAIL_PAGE_BODY_HTML,
+                )
+                detail_results.append(
+                    {"title": detail_title, "ok": True, "url": _page_browser_url(base_url, created)}
+                )
+        except Exception as exc:  # noqa: BLE001 - 하나 실패해도 나머지는 계속 처리한다
+            detail_results.append({"title": detail_title, "ok": False, "error": str(exc)})
+
+    trashed_results: List[dict] = []
+    for orig_index in deleted_orig_indexes:
+        target = detail_pages.get(orig_index)
+        if target is None:
+            continue
+        say(f"상세 페이지 휴지통으로 이동 중... {target.get('title', '')}")
+        try:
+            _trash_page(base_url, effective_token, target["id"])
+            trashed_results.append({"title": target.get("title", ""), "ok": True})
+        except Exception as exc:  # noqa: BLE001 - 하나 실패해도 나머지는 계속 처리한다
+            trashed_results.append({"title": target.get("title", ""), "ok": False, "error": str(exc)})
+
+    say("완료")
+    return {
+        "page_id": page_id,
+        "url": _page_browser_url(base_url, updated_page),
+        "title": updated_page.get("title", page.get("title")),
+        "detail_pages": detail_results,
+        "trashed_detail_pages": trashed_results,
+    }
 
 
 def create_agenda_page(

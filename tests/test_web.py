@@ -857,6 +857,226 @@ class ConfluenceDocxAndPatTest(unittest.TestCase):
         self.assertIn('class="nav-link " href="/agenda"', body)
         self.assertIn('class="nav-link active" href="/confluence-to-docx"', body)
 
+    def test_persistent_top_nav_includes_agenda_edit_link_when_available(self):
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=True):
+            resp = self.client.get("/agenda")
+
+        self.assertIn(b'href="/agenda/edit"', resp.data)
+
+    def test_persistent_top_nav_hides_agenda_edit_link_when_not_available(self):
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=False):
+            resp = self.client.get("/agenda")
+
+        self.assertNotIn(b'href="/agenda/edit"', resp.data)
+
+
+class AgendaEditPageTest(unittest.TestCase):
+    """/agenda/edit - 이미 만든 안건 페이지를 불러와 안건 제목을
+    추가/수정/삭제하는 화면."""
+
+    def setUp(self):
+        app.testing = True
+        self.client = app.test_client()
+
+    def test_redirects_to_home_when_feature_not_available(self):
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=False):
+            resp = self.client.get("/agenda/edit", follow_redirects=False)
+
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp.headers["Location"], "/")
+
+    def test_get_shows_load_form(self):
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=True):
+            resp = self.client.get("/agenda/edit")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(b'name="page_url"', resp.data)
+        self.assertIn(b'value="load"', resp.data)
+
+    def test_load_without_url_shows_error(self):
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=True):
+            resp = self.client.post("/agenda/edit", data={"action": "load", "page_url": ""})
+
+        self.assertIn("안건 페이지 URL을 입력해주세요".encode(), resp.data)
+
+    def test_load_without_token_shows_error(self):
+        with mock.patch(
+            "confluence_agenda.web.app.docx_export_configured", return_value=True
+        ), mock.patch("confluence_agenda.web.app.resolve_confluence_token", return_value=None):
+            resp = self.client.post(
+                "/agenda/edit",
+                data={"action": "load", "page_url": "https://wiki.example.com/pages/200"},
+            )
+
+        self.assertIn("PAT".encode(), resp.data)
+
+    def test_load_failure_shows_error_message(self):
+        with mock.patch(
+            "confluence_agenda.web.app.docx_export_configured", return_value=True
+        ), mock.patch(
+            "confluence_agenda.web.app.resolve_confluence_token", return_value="my-pat"
+        ), mock.patch(
+            "confluence_agenda.web.app.load_agenda_page_for_editing",
+            side_effect=RuntimeError("페이지 200을 찾을 수 없습니다(404)."),
+        ):
+            resp = self.client.post(
+                "/agenda/edit",
+                data={"action": "load", "page_url": "https://wiki.example.com/pages/200"},
+            )
+
+        self.assertIn("안건 페이지를 불러오지 못했습니다".encode(), resp.data)
+        self.assertIn("찾을 수 없습니다".encode(), resp.data)
+
+    def test_load_success_shows_editable_rows_and_blank_new_rows(self):
+        fake_loaded = {
+            "page_id": "200",
+            "url": "https://wiki.example.com/pages/200",
+            "title": "회의록",
+            "items": [{"index": 1, "title": "안건A"}, {"index": 2, "title": "안건B"}],
+        }
+        with mock.patch(
+            "confluence_agenda.web.app.docx_export_configured", return_value=True
+        ), mock.patch(
+            "confluence_agenda.web.app.resolve_confluence_token", return_value="my-pat"
+        ), mock.patch(
+            "confluence_agenda.web.app.load_agenda_page_for_editing", return_value=fake_loaded
+        ):
+            resp = self.client.post(
+                "/agenda/edit",
+                data={"action": "load", "page_url": "https://wiki.example.com/pages/200"},
+            )
+
+        body = resp.data.decode("utf-8")
+        self.assertIn('value="안건A"', body)
+        self.assertIn('value="안건B"', body)
+        self.assertEqual(body.count('name="orig_index" value="1"'), 1)
+        self.assertEqual(body.count('name="orig_index" value="2"'), 1)
+        self.assertIn('placeholder="새 안건 제목"', body)
+        self.assertIn(b'value="save"', resp.data)
+
+    def test_save_without_any_items_shows_error(self):
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=True):
+            resp = self.client.post(
+                "/agenda/edit",
+                data={
+                    "action": "save",
+                    "page_url": "https://wiki.example.com/pages/200",
+                    "orig_index": ["1", ""],
+                    "title": ["", ""],
+                },
+            )
+
+        self.assertIn("최소 1개 이상의 안건이 필요합니다".encode(), resp.data)
+
+    def test_save_sends_kept_renamed_new_items_and_excludes_deleted(self):
+        fake_result = {
+            "page_id": "200",
+            "url": "https://wiki.example.com/x/200",
+            "title": "회의록",
+            "detail_pages": [],
+            "trashed_detail_pages": [],
+        }
+        with mock.patch(
+            "confluence_agenda.web.app.docx_export_configured", return_value=True
+        ), mock.patch(
+            "confluence_agenda.web.app.resolve_confluence_token", return_value="my-pat"
+        ), mock.patch(
+            "confluence_agenda.web.app.update_agenda_page", return_value=fake_result
+        ) as fake_update, mock.patch(
+            "confluence_agenda.web.app.load_agenda_page_for_editing",
+            return_value={
+                "page_id": "200",
+                "url": "https://wiki.example.com/pages/200",
+                "title": "회의록",
+                "items": [{"index": 1, "title": "안건A-수정"}, {"index": 2, "title": "새 안건"}],
+            },
+        ):
+            resp = self.client.post(
+                "/agenda/edit",
+                data={
+                    "action": "save",
+                    "page_url": "https://wiki.example.com/pages/200",
+                    "orig_index": ["1", "2", ""],
+                    "title": ["안건A-수정", "안건B", "새 안건"],
+                    "delete_orig_index": ["2"],
+                },
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        fake_update.assert_called_once()
+        args, kwargs = fake_update.call_args
+        self.assertEqual(args[0], "https://wiki.example.com/pages/200")
+        # 2번은 삭제 체크됐으니 최종 목록에서 빠지고, 새 항목(원래 번호
+        # 없음)은 포함돼야 한다.
+        self.assertEqual(args[1], [(1, "안건A-수정"), (None, "새 안건")])
+        self.assertEqual(kwargs["deleted_orig_indexes"], [2])
+        self.assertEqual(kwargs["token"], "my-pat")
+
+    def test_save_failure_shows_error_message(self):
+        with mock.patch(
+            "confluence_agenda.web.app.docx_export_configured", return_value=True
+        ), mock.patch(
+            "confluence_agenda.web.app.resolve_confluence_token", return_value="my-pat"
+        ), mock.patch(
+            "confluence_agenda.web.app.update_agenda_page",
+            side_effect=RuntimeError("안건 페이지 200의 버전 정보를 확인할 수 없습니다."),
+        ):
+            resp = self.client.post(
+                "/agenda/edit",
+                data={
+                    "action": "save",
+                    "page_url": "https://wiki.example.com/pages/200",
+                    "orig_index": ["1"],
+                    "title": ["안건A"],
+                },
+            )
+
+        self.assertIn("안건 페이지 수정 실패".encode(), resp.data)
+        self.assertIn("버전 정보를 확인할 수 없습니다".encode(), resp.data)
+
+    def test_save_success_shows_detail_and_trashed_results(self):
+        fake_result = {
+            "page_id": "200",
+            "url": "https://wiki.example.com/x/200",
+            "title": "회의록",
+            "detail_pages": [
+                {"title": "(첨부 1) 안건A-수정", "ok": True, "url": "https://wiki.example.com/x/301"}
+            ],
+            "trashed_detail_pages": [{"title": "(첨부 2) 안건B", "ok": True}],
+        }
+        fake_loaded_after = {
+            "page_id": "200",
+            "url": "https://wiki.example.com/pages/200",
+            "title": "회의록",
+            "items": [{"index": 1, "title": "안건A-수정"}],
+        }
+        with mock.patch(
+            "confluence_agenda.web.app.docx_export_configured", return_value=True
+        ), mock.patch(
+            "confluence_agenda.web.app.resolve_confluence_token", return_value="my-pat"
+        ), mock.patch(
+            "confluence_agenda.web.app.update_agenda_page", return_value=fake_result
+        ), mock.patch(
+            "confluence_agenda.web.app.load_agenda_page_for_editing", return_value=fake_loaded_after
+        ):
+            resp = self.client.post(
+                "/agenda/edit",
+                data={
+                    "action": "save",
+                    "page_url": "https://wiki.example.com/pages/200",
+                    "orig_index": ["1", "2"],
+                    "title": ["안건A-수정", "안건B"],
+                    "delete_orig_index": ["2"],
+                },
+            )
+
+        body = resp.data.decode("utf-8")
+        self.assertIn("안건 페이지를 수정했습니다", body)
+        self.assertIn("https://wiki.example.com/x/301", body)
+        self.assertIn("휴지통으로 이동했습니다", body)
+        # 저장 후에는 최신 상태(새 번호/제목)를 다시 보여줘야 한다.
+        self.assertIn('value="안건A-수정"', body)
+
 
 class MainStartupGuardTest(unittest.TestCase):
     """importing confluence_agenda.web.* (진단 스크립트 등)은 SESSION_SECRET이
