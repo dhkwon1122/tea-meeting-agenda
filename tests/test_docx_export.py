@@ -609,9 +609,12 @@ class CreateAgendaPageTest(unittest.TestCase):
         # 상세 페이지 하나가 실패해도 안건 페이지 자체는 이미 만들어져 있어야 한다.
         self.assertEqual(result["page_id"], "200")
 
-    def test_mirror_parent_url_creates_a_copy_under_a_different_parent(self):
-        # 새로 만든 안건 페이지와 같은 제목/본문으로, 또 다른 상위 페이지
-        # 밑에 "미러" 페이지를 하나 더 만들어야 한다(사용자 요청).
+    def test_mirror_parent_url_creates_a_page_that_includes_the_original(self):
+        # 또 다른 상위 페이지 밑에 "미러" 페이지를 하나 더 만들어야 한다
+        # (사용자 요청). 안건 페이지 전체를 복사하지 않고, include
+        # 매크로로 원본 안건 페이지를 그대로 가리키기만 하면 된다(사용자
+        # 확인: "미러링 페이지는 페이지 포함 매크로로 처음 만든 안건
+        # 페이지를 가리키기만 하면 돼").
         items = [AgendaItem(title="안건1")]
 
         def fake_get(url, **kwargs):
@@ -652,20 +655,15 @@ class CreateAgendaPageTest(unittest.TestCase):
         )
         self.assertEqual(mirror_payload["title"], "회의록")
         self.assertEqual(mirror_payload["space"], {"key": "OTHER"})
-        # 미러 페이지 본문은 원본 안건 페이지와 똑같아야(같은 include
-        # 매크로로 같은 상세 페이지를 그대로 찾아갈 수 있어야) 한다.
-        agenda_payload = next(
-            call.kwargs["json"]
-            for call in mocked_post.call_args_list
-            if call.kwargs["json"]["ancestors"] == [{"id": "100"}]
-        )
-        self.assertEqual(
-            mirror_payload["body"]["storage"]["value"], agenda_payload["body"]["storage"]["value"]
-        )
-        # 미러 페이지는 안건 페이지와 다른 스페이스(OTHER)에 있으므로, 본문의
-        # include 매크로에는 상세 페이지가 실제로 있는 스페이스(안건 페이지
-        # 쪽 TEAM)를 명시해 둬야 어디서 쓰이든 올바르게 찾아간다.
-        self.assertIn('ri:space-key="TEAM"', agenda_payload["body"]["storage"]["value"])
+        mirror_body = mirror_payload["body"]["storage"]["value"]
+        # 안건 페이지 본문을 복사하지 않고, include 매크로 하나로 원본
+        # 안건 페이지만 가리켜야 한다 - 상세 페이지들이 아니라 안건
+        # 페이지 자체를 참조해야 한다.
+        self.assertIn('ac:name="include"', mirror_body)
+        self.assertEqual(mirror_body.count('ac:name="include"'), 1)
+        # 미러 페이지는 안건 페이지와 다른 스페이스(OTHER)에 있으므로, 안건
+        # 페이지가 실제로 있는 스페이스(TEAM)를 명시해야 올바르게 찾아간다.
+        self.assertIn('ri:space-key="TEAM" ri:content-title="회의록"', mirror_body)
 
         self.assertEqual(result["mirror_page"], {"ok": True, "title": "회의록", "url": "https://wiki.example.com/x/999"})
 

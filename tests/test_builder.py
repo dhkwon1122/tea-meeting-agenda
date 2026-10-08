@@ -8,6 +8,7 @@ from confluence_agenda.builder import (
     build_agenda_email_html,
     build_agenda_page_body,
     build_email_subject,
+    mirror_page_body_html,
     parse_agenda_input,
 )
 
@@ -160,18 +161,6 @@ class BuildAgendaPageBodyTest(unittest.TestCase):
         # space_key를 안 주면 ri:page에 스페이스를 안 적는다(기존 동작 유지).
         self.assertNotIn("ri:space-key", result)
 
-    def test_space_key_is_baked_into_every_include_macro(self):
-        # 미러 페이지처럼 이 본문이 상세 페이지와 다른 스페이스의 페이지에
-        # 쓰일 수 있어서, 상세 페이지가 실제로 있는 스페이스를 명시해야
-        # 어디서든 올바르게 찾아간다(사용자 확인: "미러링 페이지는 안건
-        # 페이지와는 다른 스페이스").
-        items = [AgendaItem(title="안건1"), AgendaItem(title="안건2")]
-        result = build_agenda_page_body(items, space_key="TEAM")
-
-        self.assertEqual(result.count('ri:space-key="TEAM"'), 2)
-        self.assertIn('ri:space-key="TEAM" ri:content-title="(첨부 1) 안건1"', result)
-        self.assertIn('ri:space-key="TEAM" ri:content-title="(첨부 2) 안건2"', result)
-
     def test_multiple_items_preserve_order_and_numbering(self):
         items = [AgendaItem(title=f"안건{i}") for i in range(1, 4)]
         result = build_agenda_page_body(items)
@@ -210,6 +199,22 @@ class DefaultDetailPageBodyHtmlTest(unittest.TestCase):
         self.assertNotIn("【", DEFAULT_DETAIL_PAGE_BODY_HTML)
         self.assertNotIn("】", DEFAULT_DETAIL_PAGE_BODY_HTML)
         self.assertIn("<strong>표/그림 또는 특정 안건 개요 제목</strong>", DEFAULT_DETAIL_PAGE_BODY_HTML)
+
+
+class MirrorPageBodyHtmlTest(unittest.TestCase):
+    def test_includes_the_original_page_with_given_space_key(self):
+        # 미러 페이지는 안건 페이지 전체를 복사하지 않고, include 매크로로
+        # 원본 안건 페이지를 그대로 가리키기만 해야 한다(사용자 요청).
+        result = mirror_page_body_html("회의록", "TEAM")
+
+        self.assertIn('ac:name="include"', result)
+        self.assertIn('ri:space-key="TEAM" ri:content-title="회의록"', result)
+
+    def test_omits_space_key_attribute_when_not_given(self):
+        result = mirror_page_body_html("회의록")
+
+        self.assertNotIn("ri:space-key", result)
+        self.assertIn('ri:content-title="회의록"', result)
 
 
 class BuildAgendaEmailHtmlTest(unittest.TestCase):

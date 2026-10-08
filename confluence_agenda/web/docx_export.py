@@ -119,6 +119,7 @@ from ..builder import (
     AgendaItem,
     attachment_page_title,
     build_agenda_page_body,
+    mirror_page_body_html,
 )
 from . import confluence_credentials
 
@@ -633,16 +634,18 @@ def create_agenda_page(
     실패했는지는 반환값의 detail_pages에 그대로 담겨서 화면에 보여줄 수
     있다.
 
-    mirror_parent_url을 주면, 방금 만든 안건 페이지와 같은 제목/본문으로
-    또 다른 상위 페이지 밑에 "미러" 페이지를 하나 더 만든다(사용자 요청:
-    "새로 생성한 안건 페이지를 미러링하는 새로운 페이지도 하나 더 생성 -
-    그 페이지의 상위 페이지는 또 다른 페이지"). 미러 페이지는 안건
-    페이지와 다른 스페이스에 있을 수 있어서(사용자 확인), 본문을 만들 때
-    상세 페이지가 실제로 있는 스페이스(= 안건 페이지의 스페이스)를 include
-    매크로에 명시해 둔다(builder.build_agenda_page_body의 space_key) -
-    그래야 미러 페이지가 다른 스페이스에 있어도 상세 페이지를 그대로
-    찾아간다. 미러 페이지 생성이 실패해도 안건 페이지/상세 페이지는 이미 만들어져
-    있으므로 예외를 던지지 않고 결과의 mirror_page에 실패 사유를 담는다.
+    mirror_parent_url을 주면, 또 다른 상위 페이지 밑에 "미러" 페이지를
+    하나 더 만든다(사용자 요청: "새로 생성한 안건 페이지를 미러링하는
+    새로운 페이지도 하나 더 생성 - 그 페이지의 상위 페이지는 또 다른
+    페이지"). 안건 페이지 본문을 그대로 복사하지 않고, include 매크로로
+    방금 만든 안건 페이지를 그대로 가리키기만 한다(사용자 확인: "미러링
+    페이지는 페이지 포함 매크로로 처음 만든 안건 페이지를 가리키기만
+    하면 돼"). 미러 페이지는 안건 페이지와 다른 스페이스에 있을 수 있어서
+    (사용자 확인), include 매크로에 안건 페이지의 스페이스를 명시해 둔다
+    (builder.mirror_page_body_html) - 그래야 미러 페이지가 다른 스페이스에
+    있어도 안건 페이지를 그대로 찾아간다. 미러 페이지 생성이 실패해도
+    안건 페이지/상세 페이지는 이미 만들어져 있으므로 예외를 던지지 않고
+    결과의 mirror_page에 실패 사유를 담는다.
     """
     say = on_progress or (lambda message: None)
 
@@ -675,9 +678,7 @@ def create_agenda_page(
         raise RuntimeError(f"상위 페이지 {parent_id}의 스페이스를 확인할 수 없습니다.")
 
     say("안건 페이지 생성 중...")
-    body = build_agenda_page_body(
-        items, intro=intro, include_setup_section=False, space_key=space_key
-    )
+    body = build_agenda_page_body(items, intro=intro, include_setup_section=False)
     agenda_page = _create_page(
         base_url,
         effective_token,
@@ -726,7 +727,7 @@ def create_agenda_page(
                 space_key=mirror_space_key,
                 parent_id=mirror_parent_id,
                 title=title,
-                body_storage=body,
+                body_storage=mirror_page_body_html(title, space_key),
             )
             mirror_page = {"ok": True, "title": title, "url": _page_browser_url(base_url, mirror)}
         except Exception as exc:  # noqa: BLE001 - 미러 실패해도 안건/상세 페이지는 이미 만들어졌다
