@@ -1012,6 +1012,52 @@ class AgendaEditPageTest(unittest.TestCase):
         self.assertEqual(kwargs["deleted_orig_indexes"], [2])
         self.assertEqual(kwargs["token"], "my-pat")
 
+    def test_save_preserves_reordered_row_submission_order(self):
+        # ▲▼ 버튼은 순수 JS로 DOM 순서만 바꾸므로, 서버는 그냥 제출된
+        # orig_index/title 순서를 최종 순서로 그대로 써야 한다(여기서는
+        # 폼 필드 순서를 직접 바꿔서 "3번을 맨 앞으로 옮긴" 상황을
+        # 흉내낸다).
+        fake_result = {
+            "page_id": "200",
+            "url": "https://wiki.example.com/x/200",
+            "title": "회의록",
+            "detail_pages": [],
+            "trashed_detail_pages": [],
+        }
+        with mock.patch(
+            "confluence_agenda.web.app.docx_export_configured", return_value=True
+        ), mock.patch(
+            "confluence_agenda.web.app.resolve_confluence_token", return_value="my-pat"
+        ), mock.patch(
+            "confluence_agenda.web.app.update_agenda_page", return_value=fake_result
+        ) as fake_update, mock.patch(
+            "confluence_agenda.web.app.load_agenda_page_for_editing",
+            return_value={
+                "page_id": "200",
+                "url": "https://wiki.example.com/pages/200",
+                "title": "회의록",
+                "items": [
+                    {"index": 1, "title": "안건C"},
+                    {"index": 2, "title": "안건A"},
+                    {"index": 3, "title": "안건B"},
+                ],
+            },
+        ):
+            resp = self.client.post(
+                "/agenda/edit",
+                data={
+                    "action": "save",
+                    "page_url": "https://wiki.example.com/pages/200",
+                    # 원래 순서는 1,2,3이지만 3번을 맨 앞으로 옮겨서 제출.
+                    "orig_index": ["3", "1", "2"],
+                    "title": ["안건C", "안건A", "안건B"],
+                },
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        args, _ = fake_update.call_args
+        self.assertEqual(args[1], [(3, "안건C"), (1, "안건A"), (2, "안건B")])
+
     def test_save_failure_shows_error_message(self):
         with mock.patch(
             "confluence_agenda.web.app.docx_export_configured", return_value=True

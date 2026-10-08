@@ -513,12 +513,16 @@ AGENDA_EDIT_PAGE_TEMPLATE = """
       <h2>{{ loaded.title }}</h2>
       <p class="subtitle" style="margin:0 0 16px;">
         제목을 고치거나 "삭제"를 체크한 뒤 저장하세요. 아래 빈 칸에 제목을
-        쓰면 새 안건으로 추가됩니다. 삭제된 항목의 상세 페이지는 완전
-        삭제가 아니라 휴지통으로 이동합니다(복구 가능).
+        쓰면 새 안건으로 추가됩니다. ▲▼로 순서를 바꿀 수 있습니다(최종
+        번호는 이 화면에서 보이는 순서대로 다시 매겨집니다). 삭제된
+        항목의 상세 페이지는 완전 삭제가 아니라 휴지통으로 이동합니다
+        (복구 가능).
       </p>
-      <div id="agenda-existing-rows">
+      <div id="agenda-rows">
         {% for item in loaded['items'] %}
-        <div class="field" style="display:flex; gap:8px; align-items:center;">
+        <div class="field agenda-row" style="display:flex; gap:8px; align-items:center;">
+          <button type="button" class="secondary" style="padding:4px 10px;" onclick="moveAgendaRow(this, -1)">▲</button>
+          <button type="button" class="secondary" style="padding:4px 10px;" onclick="moveAgendaRow(this, 1)">▼</button>
           <input type="hidden" name="orig_index" value="{{ item.index }}">
           <input type="text" name="title" value="{{ item.title }}" style="flex:1;"
                  onkeydown="if(event.key==='Enter'){event.preventDefault();}">
@@ -527,10 +531,10 @@ AGENDA_EDIT_PAGE_TEMPLATE = """
           </label>
         </div>
         {% endfor %}
-      </div>
-      <div id="agenda-new-rows">
         {% for _ in range(3) %}
-        <div class="field" style="display:flex; gap:8px; align-items:center;">
+        <div class="field agenda-row" style="display:flex; gap:8px; align-items:center;">
+          <button type="button" class="secondary" style="padding:4px 10px;" onclick="moveAgendaRow(this, -1)">▲</button>
+          <button type="button" class="secondary" style="padding:4px 10px;" onclick="moveAgendaRow(this, 1)">▼</button>
           <input type="hidden" name="orig_index" value="">
           <input type="text" name="title" value="" placeholder="새 안건 제목" style="flex:1;"
                  onkeydown="if(event.key==='Enter'){event.preventDefault();}">
@@ -579,15 +583,29 @@ AGENDA_EDIT_PAGE_TEMPLATE = """
 
   <script>
     function addAgendaRow() {
-      var container = document.getElementById('agenda-new-rows');
+      var container = document.getElementById('agenda-rows');
       var row = document.createElement('div');
-      row.className = 'field';
+      row.className = 'field agenda-row';
       row.style.cssText = 'display:flex; gap:8px; align-items:center;';
       row.innerHTML =
+        '<button type="button" class="secondary" style="padding:4px 10px;" onclick="moveAgendaRow(this, -1)">▲</button>' +
+        '<button type="button" class="secondary" style="padding:4px 10px;" onclick="moveAgendaRow(this, 1)">▼</button>' +
         '<input type="hidden" name="orig_index" value="">' +
         '<input type="text" name="title" value="" placeholder="새 안건 제목" style="flex:1;" ' +
         'onkeydown="if(event.key===\\'Enter\\'){event.preventDefault();}">';
       container.appendChild(row);
+    }
+
+    function moveAgendaRow(button, direction) {
+      var row = button.closest('.agenda-row');
+      if (!row) return;
+      var sibling = direction < 0 ? row.previousElementSibling : row.nextElementSibling;
+      if (!sibling) return;
+      if (direction < 0) {
+        row.parentNode.insertBefore(row, sibling);
+      } else {
+        row.parentNode.insertBefore(sibling, row);
+      }
     }
   </script>
 </body>
