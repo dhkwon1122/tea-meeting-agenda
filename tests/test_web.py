@@ -857,6 +857,18 @@ class ConfluenceDocxAndPatTest(unittest.TestCase):
         self.assertIn('class="nav-link " href="/agenda"', body)
         self.assertIn('class="nav-link active" href="/confluence-to-docx"', body)
 
+    def test_home_page_shows_agenda_edit_choice_card_when_available(self):
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=True):
+            resp = self.client.get("/")
+
+        self.assertIn(b'href="/agenda/edit"', resp.data)
+
+    def test_home_page_hides_agenda_edit_choice_card_when_not_available(self):
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=False):
+            resp = self.client.get("/")
+
+        self.assertNotIn(b'href="/agenda/edit"', resp.data)
+
     def test_persistent_top_nav_includes_agenda_edit_link_when_available(self):
         with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=True):
             resp = self.client.get("/agenda")

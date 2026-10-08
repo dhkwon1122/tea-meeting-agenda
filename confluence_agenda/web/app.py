@@ -283,6 +283,13 @@ HOME_PAGE_TEMPLATE = """
       </div>
     </a>
     {% if docx_export_configured %}
+    <a class="choice-card" href="/agenda/edit">
+      <div class="choice-icon">✏️</div>
+      <div class="choice-title">안건 수정</div>
+      <div class="choice-desc">
+        이미 만든 안건 페이지를 불러와 제목을 추가/수정/삭제하고 순서를 바꿉니다.
+      </div>
+    </a>
     <a class="choice-card" href="/confluence-to-docx">
       <div class="choice-icon">📄</div>
       <div class="choice-title">워드 파일 변환</div>
