@@ -1184,12 +1184,11 @@ def _clean_text(text: Optional[str]) -> str:
 # 별도의 한국어 어미 변환 규칙 시스템이나 LLM 호출이 필요해 이 기능의 범위를
 # 크게 넘어선다.
 
-_NUMBERING_LEVELS = [
-    {"marker": "{n}.", "indent_mm": 0, "hanging_mm": 7},
-    {"marker": "□", "indent_mm": 4, "hanging_mm": 6},
-    {"marker": "-", "indent_mm": 8, "hanging_mm": 5},
-    {"marker": "·", "indent_mm": 12, "hanging_mm": 5},
-]
+# 단계별 말머리만 쓰고 들여쓰기는 주지 않는다(사용자 피드백: "왼쪽으로 너무
+# 많이 들여쓰기 되는 것들도 있더라" - 깊은 단계일수록 본문이 점점 오른쪽으로
+# 밀려나 보기 불편했다). 단계 구분은 말머리 모양("1." vs "□" vs "-" vs "·")
+# 만으로 충분하다.
+_NUMBERING_LEVELS = ["{n}.", "□", "-", "·"]
 _HEADING_FOLD_BASE = 2  # h2가 첫 단계(depth 0)가 된다 - h1은 문서/쪽 제목용.
 
 _LEVEL_SYMBOL_ALIASES = {
@@ -1199,8 +1198,8 @@ _LEVEL_SYMBOL_ALIASES = {
 }
 _LEVEL_SYMBOL_TO_DEPTH: dict = {}
 for _depth, _level in enumerate(_NUMBERING_LEVELS):
-    if "{n}" not in _level["marker"]:
-        _LEVEL_SYMBOL_TO_DEPTH[_level["marker"]] = _depth
+    if "{n}" not in _level:
+        _LEVEL_SYMBOL_TO_DEPTH[_level] = _depth
 for _marker, _aliases in _LEVEL_SYMBOL_ALIASES.items():
     for _alias in _aliases:
         _LEVEL_SYMBOL_TO_DEPTH[_alias] = _LEVEL_SYMBOL_TO_DEPTH[_marker]
@@ -1612,22 +1611,21 @@ def _render_listitem(
     document: DocxDocument, element: etree._Element, counters: dict, images: dict
 ) -> None:
     """번호 체계 단계(1./□/-/·) 항목 하나를 렌더링한다 - doc2report의
-    render/docx_writer.py::_list_item을 참고해 새로 구현(내어쓰기/탭 정렬,
-    말머리 자동 번호 매기기)."""
+    render/docx_writer.py::_list_item을 참고해 새로 구현(말머리 자동 번호
+    매기기). 단계가 깊어져도 들여쓰기는 주지 않는다(사용자 피드백: "왼쪽으로
+    너무 많이 들여쓰기 되는 것들도 있더라") - 단계는 말머리 모양으로만
+    구분한다."""
     depth = int(element.get("data-depth", "0"))
     level = _NUMBERING_LEVELS[min(depth, len(_NUMBERING_LEVELS) - 1)]
     marker = element.get("data-marker")
     if marker is None and element.get("data-suppress-auto-marker") != "1":
-        marker = _format_marker(level["marker"], depth, counters)
+        marker = _format_marker(level, depth, counters)
     # 제목에서 접어 넣은 항목은 원문 굵기와 무관하게 항상 굵게(doc2report와 동일) -
     # 그 외(원래 목록/문단이던 항목)는 원문 서식(굵게/기울임 등)만 그대로 쓴다.
     bold = element.get("data-from-heading") == "1"
 
     paragraph = document.add_paragraph()
-    paragraph.paragraph_format.left_indent = Mm(level["indent_mm"])
     if marker:
-        paragraph.paragraph_format.first_line_indent = Mm(-level["hanging_mm"])
-        paragraph.paragraph_format.tab_stops.add_tab_stop(Mm(level["indent_mm"]))
         marker_run = paragraph.add_run(marker + "\t")
         marker_run.bold = bold or None
     _add_inline_runs(paragraph, element, images, bold=bold)

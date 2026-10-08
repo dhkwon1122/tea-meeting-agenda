@@ -1003,16 +1003,18 @@ class StructuralFoldTest(unittest.TestCase):
         self.assertIn("추진 배경", texts)
         self.assertIn("세부 계획", texts)
 
-    def test_heading_levels_map_to_increasing_indent_without_markers(self):
+    def test_heading_levels_show_increasing_marker_depth_without_indent(self):
+        # 단계가 깊어져도 왼쪽 들여쓰기는 주지 않는다(사용자 피드백:
+        # "왼쪽으로 너무 많이 들여쓰기 되는 것들도 있더라") - 단계 구분은
+        # 말머리 모양만으로 한다.
         data = self._convert("<h2>대분류</h2><h3>중분류</h3><h4>소분류</h4>")
         document = DocxDocument(io.BytesIO(data))
         by_text = {p.text: p for p in document.paragraphs}
         self.assertIn("대분류", by_text)
         self.assertIn("중분류", by_text)
         self.assertIn("소분류", by_text)
-        self.assertAlmostEqual(by_text["대분류"].paragraph_format.left_indent, Mm(0), delta=200)
-        self.assertAlmostEqual(by_text["중분류"].paragraph_format.left_indent, Mm(4), delta=200)
-        self.assertAlmostEqual(by_text["소분류"].paragraph_format.left_indent, Mm(8), delta=300)
+        for text in ("대분류", "중분류", "소분류"):
+            self.assertIsNone(by_text[text].paragraph_format.left_indent)
 
     def test_heading_with_existing_marker_text_is_kept_verbatim_not_doubled(self):
         # 원문에 이미 "1." 같은 말머리가 타이핑돼 있으면 그대로 쓰고 새로
@@ -1056,15 +1058,16 @@ class StructuralFoldTest(unittest.TestCase):
         self.assertIn("측정 기준은 내부 지표입니다.", texts)
         self.assertNotIn("1.\t측정 기준은 내부 지표입니다.", texts)
 
-    def test_paragraph_under_heading_without_marker_becomes_next_depth_item(self):
-        # 말머리("□")는 새로 만들어 붙이지 않지만(auto_markers=false와 같은
-        # 취지), 제목 아래 단계만큼 들여쓰기는 그대로 적용된다.
+    def test_paragraph_under_heading_without_marker_stays_without_indent(self):
+        # 말머리("□")는 새로 만들어 붙이지 않고(auto_markers=false와 같은
+        # 취지), 왼쪽 들여쓰기도 주지 않는다(사용자 피드백: "왼쪽으로 너무
+        # 많이 들여쓰기 되는 것들도 있더라").
         data = self._convert("<h2>소제목</h2><p>본문</p><p>본문2</p>")
         document = DocxDocument(io.BytesIO(data))
         body_paragraphs = [p for p in document.paragraphs if p.text in ("본문", "본문2")]
         self.assertEqual(len(body_paragraphs), 2)
         for paragraph in body_paragraphs:
-            self.assertAlmostEqual(paragraph.paragraph_format.left_indent, Mm(4), delta=200)
+            self.assertIsNone(paragraph.paragraph_format.left_indent)
 
     def test_paragraph_before_any_heading_with_no_marker_stays_plain(self):
         data = self._convert("<p>제목도 말머리도 없는 문단</p>")
@@ -1079,15 +1082,16 @@ class StructuralFoldTest(unittest.TestCase):
         self.assertFalse(any(t.strip() in ("-", "□", "·") for t in texts))
         self.assertIn("본문", texts)
 
-    def test_h3_only_document_normalizes_to_depth_zero_indent(self):
-        # h2 없이 h3부터 시작하는 문서(normalize_levels) - h3는 원래 depth1(4mm
-        # 들여쓰기)이지만 문서 전체의 최저 단계가 h3뿐이면 그 최저 단계를
-        # 0(들여쓰기 없음)으로 민다.
-        data = self._convert("<h3>첫 항목</h3><h3>둘째 항목</h3>")
-        document = DocxDocument(io.BytesIO(data))
-        by_text = {p.text: p for p in document.paragraphs}
-        self.assertAlmostEqual(by_text["첫 항목"].paragraph_format.left_indent, Mm(0), delta=200)
-        self.assertAlmostEqual(by_text["둘째 항목"].paragraph_format.left_indent, Mm(0), delta=200)
+    def test_h3_only_document_normalizes_marker_depth_to_match_h2_baseline(self):
+        # h2 없이 h3부터 시작하는 문서(normalize_levels) - h3는 원래 depth1
+        # ("□" 단계)이지만 문서 전체의 최저 단계가 h3뿐이면 그 최저 단계를
+        # 0("1." 단계)으로 민다. 들여쓰기는 이제 안 쓰지만, 그 아래 목록이
+        # 받는 말머리 단계는 여전히 이 정규화를 따라야 한다("□" 대신 "-"가
+        # 되면 h2부터 시작하는 문서와 체계가 어긋난다).
+        data = self._convert("<h3>첫 항목</h3><ul><li>하위 항목</li></ul>")
+        texts = _docx_paragraph_texts(data)
+        self.assertIn("□\t하위 항목", texts)
+        self.assertNotIn("-\t하위 항목", texts)
 
     def test_heading_with_marker_nested_inside_formatting_tags_is_detected(self):
         # 이 프로젝트의 builder.py가 실제로 만드는 안건 제목 구조 -
