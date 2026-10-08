@@ -823,6 +823,32 @@ class UpdateAgendaPageTest(unittest.TestCase):
             }
         )
 
+    def test_fetches_page_with_version_expanded(self):
+        # 사내 Confluence는 expand로 명시하지 않으면 응답에 version이 안
+        # 실려서(실사용 보고: "안건 페이지의 버전 정보를 확인할 수
+        # 없습니다") version+1로 PUT해야 하는데 버전을 못 구하는 문제가
+        # 있었다 - 요청에 expand=...,version이 반드시 포함돼야 한다.
+        page_resp = self._page_resp()
+        children_resp = self._children_resp()
+
+        def fake_get(url, **kwargs):
+            if url.endswith("/rest/api/content/200"):
+                self.assertIn("version", kwargs["params"]["expand"].split(","))
+                return page_resp
+            if url.endswith("/rest/api/content/200/child/page"):
+                return children_resp
+            raise AssertionError(f"unexpected GET: {url}")
+
+        with mock.patch("requests.get", side_effect=fake_get), mock.patch(
+            "requests.put",
+            side_effect=lambda url, **kwargs: _fake_response(
+                json_data={**kwargs["json"], "_links": {"webui": "/x/200"}}
+            ),
+        ):
+            update_agenda_page(
+                "https://wiki.example.com/pages/200", items=[(1, "안건A"), (2, "안건B"), (3, "안건C")]
+            )
+
     def test_renumbers_detail_pages_when_an_earlier_item_is_removed(self):
         # 안건B(2번)를 지우면, 안건C는 제목이 안 바뀌었어도 번호가
         # 3->2로 밀리므로 그 상세 페이지 제목도 "(첨부 2) 안건C"로

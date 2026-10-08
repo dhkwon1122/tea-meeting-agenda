@@ -505,10 +505,14 @@ def diagnose_connection(token: Optional[str] = None) -> List[str]:
 
 
 def _fetch_page(base_url: str, page_id: str, token: str) -> dict:
+    """version도 같이 받아온다 - 사내 Confluence는 expand로 명시하지 않으면
+    응답에 version이 안 실려서(실사용에서 발견: "안건 페이지의 버전
+    정보를 확인할 수 없습니다" 에러), update_agenda_page처럼 현재
+    버전+1로 PUT해야 하는 호출부가 매번 또 조회해야 했다."""
     try:
         resp = requests.get(
             f"{base_url}/rest/api/content/{page_id}",
-            params={"expand": "body.storage,space"},
+            params={"expand": "body.storage,space,version"},
             headers=_request_headers(token),
             timeout=30,
             verify=_ssl_verify(),
