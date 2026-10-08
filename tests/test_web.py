@@ -763,6 +763,30 @@ class ConfluenceDocxAndPatTest(unittest.TestCase):
 
         self.assertIn(b'href="/agenda"', resp.data)
 
+    def test_persistent_top_nav_shows_both_feature_links_on_agenda_page(self):
+        # 다른 화면으로 가더라도 맨 위에서 두 기능을 바로 전환할 수 있어야
+        # 한다 - 메인(선택) 화면으로 먼저 돌아갈 필요가 없게.
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=True):
+            resp = self.client.get("/agenda")
+
+        body = resp.data.decode("utf-8")
+        self.assertIn('class="nav-link active" href="/agenda"', body)
+        self.assertIn('class="nav-link " href="/confluence-to-docx"', body)
+
+    def test_persistent_top_nav_hides_docx_link_when_feature_not_available(self):
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=False):
+            resp = self.client.get("/agenda")
+
+        self.assertNotIn(b'href="/confluence-to-docx"', resp.data)
+
+    def test_persistent_top_nav_shows_both_feature_links_on_docx_page(self):
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=True):
+            resp = self.client.get("/confluence-to-docx")
+
+        body = resp.data.decode("utf-8")
+        self.assertIn('class="nav-link " href="/agenda"', body)
+        self.assertIn('class="nav-link active" href="/confluence-to-docx"', body)
+
 
 class MainStartupGuardTest(unittest.TestCase):
     """importing confluence_agenda.web.* (진단 스크립트 등)은 SESSION_SECRET이

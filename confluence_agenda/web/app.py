@@ -207,7 +207,7 @@ _APP_STYLE = """
   .user-info a { color: var(--blue); text-decoration: none; margin-left: 10px; }
   .user-info a:hover { text-decoration: underline; }
 
-  .nav-row { margin-bottom: 20px; }
+  .nav-row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px; }
   .nav-link {
     display: inline-flex; align-items: center; gap: 6px;
     font-family: inherit; font-size: 0.9rem; font-weight: 500; border-radius: 20px;
@@ -215,6 +215,7 @@ _APP_STYLE = """
     background: var(--surface); color: var(--blue); text-decoration: none; transition: all .15s;
   }
   .nav-link:hover { background: var(--blue-tint); border-color: var(--blue); }
+  .nav-link.active { background: var(--blue); color: #fff; border-color: var(--blue); }
   .back-link { font-size: 0.85rem; color: var(--blue); text-decoration: none; }
   .back-link:hover { text-decoration: underline; }
 
@@ -233,6 +234,18 @@ _APP_STYLE = """
   .choice-desc { font-size: 0.85rem; color: var(--text-muted); }
 """
 
+# 두 기능(안건 페이지 생성/워드 파일 변환) 전환 버튼 - 메인 화면뿐 아니라
+# 어느 화면에서든 맨 위에서 바로 전환할 수 있어야 한다는 요청으로, 각
+# 페이지 템플릿 맨 위에 그대로 이어붙인다(_APP_STYLE과 같은 방식).
+_TOP_NAV_HTML = """
+  <div class="nav-row">
+    <a class="nav-link {{ 'active' if active_nav == 'agenda' else '' }}" href="/agenda">📝 안건 페이지 생성</a>
+    {% if docx_export_configured %}
+    <a class="nav-link {{ 'active' if active_nav == 'docx' else '' }}" href="/confluence-to-docx">📄 워드 파일 변환</a>
+    {% endif %}
+  </div>
+"""
+
 HOME_PAGE_TEMPLATE = """
 <!doctype html>
 <html lang="ko">
@@ -243,7 +256,7 @@ HOME_PAGE_TEMPLATE = """
 <style>""" + _APP_STYLE + """</style>
 </head>
 <body>
-<div class="page">
+<div class="page">""" + _TOP_NAV_HTML + """
   <header>
     <div class="header-row">
       <div>
@@ -287,7 +300,7 @@ PAGE_TEMPLATE = """
 <style>""" + _APP_STYLE + """</style>
 </head>
 <body>
-<div class="page">
+<div class="page">""" + _TOP_NAV_HTML + """
   <header>
     <div class="header-row">
       <div>
@@ -445,7 +458,7 @@ CONFLUENCE_DOCX_PAGE_TEMPLATE = """
 <style>""" + _APP_STYLE + """</style>
 </head>
 <body>
-<div class="page">
+<div class="page">""" + _TOP_NAV_HTML + """
   <header>
     <div class="header-row">
       <div>
@@ -649,6 +662,7 @@ def home():
         HOME_PAGE_TEMPLATE,
         current_user=auth.get_current_user(),
         docx_export_configured=docx_export_configured(),
+        active_nav=None,
     )
 
 
@@ -763,6 +777,7 @@ def agenda_page():
         mail_configured=is_mail_configured(),
         docx_export_configured=docx_export_configured(),
         current_user=auth.get_current_user(),
+        active_nav="agenda",
     )
 
 
@@ -785,6 +800,8 @@ def confluence_docx_page():
         docx_error=request.args.get("docx_error"),
         docx_message=request.args.get("docx_message"),
         mail_configured=is_mail_configured(),
+        docx_export_configured=True,
+        active_nav="docx",
     )
 
 

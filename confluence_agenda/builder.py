@@ -157,7 +157,7 @@ DEFAULT_DETAIL_PAGE_BODY_HTML = (
     "<p>&nbsp;&nbsp;- 가나다라마바사</p>"
     "<p>&nbsp;&nbsp;- 가나다라마바사</p>"
     "<p><br/></p>"
-    "<p><strong>【 표/그림 또는 특정 안건 개요 제목 】</strong></p>"
+    "<p><strong>표/그림 또는 특정 안건 개요 제목</strong></p>"
     "<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;· 가나다라마바사</p>"
 )
 

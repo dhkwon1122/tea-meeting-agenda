@@ -3,6 +3,7 @@ import unittest
 from datetime import date
 
 from confluence_agenda.builder import (
+    DEFAULT_DETAIL_PAGE_BODY_HTML,
     AgendaItem,
     build_agenda_email_html,
     build_agenda_page_body,
@@ -186,6 +187,15 @@ class BuildAgendaPageBodyTest(unittest.TestCase):
 
         self.assertIn("<p>첫 줄</p>", result)
         self.assertIn("<p>둘째 줄</p>", result)
+
+
+class DefaultDetailPageBodyHtmlTest(unittest.TestCase):
+    def test_has_no_surrounding_brackets_around_the_subtitle(self):
+        # 처음엔 "【 ... 】"로 감싸뒀는데, 괄호 없이 그냥 굵은 글씨면
+        # 된다는 요청으로 뺐다.
+        self.assertNotIn("【", DEFAULT_DETAIL_PAGE_BODY_HTML)
+        self.assertNotIn("】", DEFAULT_DETAIL_PAGE_BODY_HTML)
+        self.assertIn("<strong>표/그림 또는 특정 안건 개요 제목</strong>", DEFAULT_DETAIL_PAGE_BODY_HTML)
 
 
 class BuildAgendaEmailHtmlTest(unittest.TestCase):
