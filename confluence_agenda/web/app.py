@@ -520,7 +520,8 @@ AGENDA_EDIT_PAGE_TEMPLATE = """
         {% for item in loaded['items'] %}
         <div class="field" style="display:flex; gap:8px; align-items:center;">
           <input type="hidden" name="orig_index" value="{{ item.index }}">
-          <input type="text" name="title" value="{{ item.title }}" style="flex:1;">
+          <input type="text" name="title" value="{{ item.title }}" style="flex:1;"
+                 onkeydown="if(event.key==='Enter'){event.preventDefault();}">
           <label style="display:flex; align-items:center; gap:4px; white-space:nowrap; font-size:0.85rem; color:var(--text-muted);">
             <input type="checkbox" name="delete_orig_index" value="{{ item.index }}"> 삭제
           </label>
@@ -531,7 +532,8 @@ AGENDA_EDIT_PAGE_TEMPLATE = """
         {% for _ in range(3) %}
         <div class="field" style="display:flex; gap:8px; align-items:center;">
           <input type="hidden" name="orig_index" value="">
-          <input type="text" name="title" value="" placeholder="새 안건 제목" style="flex:1;">
+          <input type="text" name="title" value="" placeholder="새 안건 제목" style="flex:1;"
+                 onkeydown="if(event.key==='Enter'){event.preventDefault();}">
         </div>
         {% endfor %}
       </div>
@@ -583,7 +585,8 @@ AGENDA_EDIT_PAGE_TEMPLATE = """
       row.style.cssText = 'display:flex; gap:8px; align-items:center;';
       row.innerHTML =
         '<input type="hidden" name="orig_index" value="">' +
-        '<input type="text" name="title" value="" placeholder="새 안건 제목" style="flex:1;">';
+        '<input type="text" name="title" value="" placeholder="새 안건 제목" style="flex:1;" ' +
+        'onkeydown="if(event.key===\\'Enter\\'){event.preventDefault();}">';
       container.appendChild(row);
     }
   </script>
@@ -1035,14 +1038,21 @@ def agenda_edit_page():
                         deleted_orig_indexes=list(deleted_orig_indexes),
                         token=token,
                     )
+                except Exception as e:
+                    message, message_ok = f"안건 페이지 수정 실패: {e}", False
+                else:
                     message, message_ok = (
                         f"'{save_result['title']}' 안건 페이지를 수정했습니다.",
                         True,
                     )
-                    # 저장 직후 최신 상태를 다시 불러와 보여준다(바로 또 고칠 수 있게).
-                    loaded = load_agenda_page_for_editing(page_url, token=token)
-                except Exception as e:
-                    message, message_ok = f"안건 페이지 수정 실패: {e}", False
+                    # 저장 직후 최신 상태를 다시 불러와 보여준다(바로 또 고칠 수
+                    # 있게) - 저장은 이미 끝났으니, 이 새로고침이 실패해도
+                    # (예: 방금 바뀐 내용이 아직 검색/조회에 안 반영됨) 저장
+                    # 성공 메시지가 "실패"로 뒤바뀌면 안 된다.
+                    try:
+                        loaded = load_agenda_page_for_editing(page_url, token=token)
+                    except Exception:
+                        pass
 
     return render_template_string(
         AGENDA_EDIT_PAGE_TEMPLATE,

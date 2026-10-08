@@ -1077,6 +1077,41 @@ class AgendaEditPageTest(unittest.TestCase):
         # 저장 후에는 최신 상태(새 번호/제목)를 다시 보여줘야 한다.
         self.assertIn('value="안건A-수정"', body)
 
+    def test_save_success_is_not_masked_by_a_failed_post_save_reload(self):
+        # 저장(update_agenda_page) 자체는 성공했는데, 그 직후 "최신 상태
+        # 다시 불러오기"(load_agenda_page_for_editing)만 실패하는 경우 -
+        # 저장은 이미 끝났으니 성공 메시지가 "실패"로 뒤바뀌면 안 된다.
+        fake_result = {
+            "page_id": "200",
+            "url": "https://wiki.example.com/x/200",
+            "title": "회의록",
+            "detail_pages": [],
+            "trashed_detail_pages": [],
+        }
+        with mock.patch(
+            "confluence_agenda.web.app.docx_export_configured", return_value=True
+        ), mock.patch(
+            "confluence_agenda.web.app.resolve_confluence_token", return_value="my-pat"
+        ), mock.patch(
+            "confluence_agenda.web.app.update_agenda_page", return_value=fake_result
+        ), mock.patch(
+            "confluence_agenda.web.app.load_agenda_page_for_editing",
+            side_effect=RuntimeError("방금 바뀐 내용이 아직 조회에 반영되지 않았습니다."),
+        ):
+            resp = self.client.post(
+                "/agenda/edit",
+                data={
+                    "action": "save",
+                    "page_url": "https://wiki.example.com/pages/200",
+                    "orig_index": ["1"],
+                    "title": ["안건A"],
+                },
+            )
+
+        body = resp.data.decode("utf-8")
+        self.assertIn("안건 페이지를 수정했습니다", body)
+        self.assertNotIn("안건 페이지 수정 실패", body)
+
 
 class MainStartupGuardTest(unittest.TestCase):
     """importing confluence_agenda.web.* (진단 스크립트 등)은 SESSION_SECRET이
