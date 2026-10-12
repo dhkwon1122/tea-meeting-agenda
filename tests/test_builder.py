@@ -10,6 +10,7 @@ from confluence_agenda.builder import (
     build_email_subject,
     mirror_page_body_html,
     parse_agenda_input,
+    parse_agenda_titles,
 )
 
 _SECTION_RE = re.compile(
@@ -303,6 +304,39 @@ class ParseAgendaInputTest(unittest.TestCase):
     def test_empty_input_returns_no_items(self):
         self.assertEqual(parse_agenda_input(""), [])
         self.assertEqual(parse_agenda_input("\n\n   \n\n"), [])
+
+
+class ParseAgendaTitlesTest(unittest.TestCase):
+    """안건 생성 화면은 이제 본문 없이 제목만 한 줄에 하나씩 받는다 - 줄바꿈
+    한 번이 곧 다음 안건이고, 빈 줄로 구분할 필요가 없다."""
+
+    def test_single_newline_separates_titles(self):
+        items = parse_agenda_titles("예산안 승인\n채용 계획\n분기 회고")
+
+        self.assertEqual([i.title for i in items], ["예산안 승인", "채용 계획", "분기 회고"])
+        self.assertEqual([i.body for i in items], ["", "", ""])
+
+    def test_browser_textarea_crlf_is_recognized(self):
+        items = parse_agenda_titles("예산안 승인\r\n채용 계획")
+
+        self.assertEqual([i.title for i in items], ["예산안 승인", "채용 계획"])
+
+    def test_blank_lines_and_whitespace_are_tolerated_but_not_required(self):
+        items = parse_agenda_titles("\n\n  예산안 승인  \n\n\n  채용 계획\n\n")
+        self.assertEqual([i.title for i in items], ["예산안 승인", "채용 계획"])
+
+    def test_second_line_is_a_separate_title_not_body(self):
+        # 이 화면은 본문을 더 안 받으므로, 제목 줄 다음 줄도 그냥 다음 안건이다.
+        items = parse_agenda_titles("예산안 승인\n부서별 예산안을 검토하고 승인합니다.")
+
+        self.assertEqual(
+            [i.title for i in items],
+            ["예산안 승인", "부서별 예산안을 검토하고 승인합니다."],
+        )
+
+    def test_empty_input_returns_no_items(self):
+        self.assertEqual(parse_agenda_titles(""), [])
+        self.assertEqual(parse_agenda_titles("\n\n   \n\n"), [])
 
 
 if __name__ == "__main__":

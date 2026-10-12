@@ -293,6 +293,21 @@ def parse_agenda_input(raw: str) -> List[AgendaItem]:
     return items
 
 
+def parse_agenda_titles(raw: str) -> List[AgendaItem]:
+    """안건 제목만 한 줄에 하나씩 받는 입력을 AgendaItem 목록으로 바꾼다.
+
+    본문은 상세 페이지나 "안건 수정" 화면에서 다루므로 이 화면에서는 더 안
+    받는다 - 줄바꿈 한 번이 곧 다음 안건이라, 빈 줄로 구분할 필요가 없다.
+    """
+    normalized = raw.replace("\r\n", "\n").replace("\r", "\n")
+    items: List[AgendaItem] = []
+    for line in normalized.splitlines():
+        title = line.strip()
+        if title:
+            items.append(AgendaItem(title=title))
+    return items
+
+
 DEFAULT_ATTACHMENT_TEMPLATE_ID = "3877634148"
 DEFAULT_ATTACHMENT_BUTTON_LABEL = "첨부 페이지 만들기"
 

@@ -48,20 +48,18 @@ class WebAppTest(unittest.TestCase):
         self.assertIn("2. 채용 계획", body)
         self.assertIn("ac:name=&#34;ui-expand&#34;", body)
 
-    def test_post_includes_already_written_body_instead_of_placeholder(self):
-        # 예산안 승인은 본문을 이미 써서 붙여넣었고, 채용 계획은 본문 없이
-        # 제목만 입력했다 - 전자는 그 내용이 그대로 들어가고, 후자만 여전히
-        # 자리표시자로 채워져야 한다.
+    def test_post_generates_source_for_single_newline_separated_titles(self):
+        # 이제 이 화면은 본문을 받지 않으므로, 빈 줄 없이 줄바꿈 한 번만으로도
+        # 안건이 구분돼야 한다.
         resp = self.client.post(
-            "/agenda",
-            data={
-                "titles": "예산안 승인\n부서별 예산안을 검토하고 승인합니다.\n\n채용 계획",
-                "action": "generate",
-            },
+            "/agenda", data={"titles": "예산안 승인\n채용 계획", "action": "generate"}
         )
+        self.assertEqual(resp.status_code, 200)
         body = resp.data.decode("utf-8")
-        self.assertIn("부서별 예산안을 검토하고 승인합니다.", body)
-        self.assertEqual(body.count("가나다라마바사"), 3)
+        self.assertIn("1. 예산안 승인", body)
+        self.assertIn("2. 채용 계획", body)
+        # 본문을 더 안 받으므로 둘 다 자리표시자로 채워진다(안건당 3줄 x 2안건).
+        self.assertEqual(body.count("가나다라마바사"), 6)
 
     def test_post_shows_macro_connection_diagram(self):
         resp = self.client.post(
@@ -364,6 +362,44 @@ class WebAppTest(unittest.TestCase):
 
         self.assertIn("안건 페이지 생성 실패".encode(), resp.data)
         self.assertIn("찾을 수 없습니다".encode(), resp.data)
+
+    def test_save_defaults_saves_parent_urls_without_requiring_titles(self):
+        # 상위 페이지 기본값만 저장하는 액션이라 안건 제목 없이도 동작해야 한다.
+        with mock.patch(
+            "confluence_agenda.web.app.docx_export_configured", return_value=True
+        ), mock.patch("confluence_agenda.web.app._save_last_publish_parents") as fake_save:
+            resp = self.client.post(
+                "/agenda",
+                data={
+                    "titles": "",
+                    "action": "save_defaults",
+                    "parent_url": "https://wiki.example.com/pages/100",
+                    "mirror_parent_url": "https://wiki.example.com/pages/900",
+                },
+            )
+
+        fake_save.assert_called_once_with(
+            "https://wiki.example.com/pages/100", "https://wiki.example.com/pages/900"
+        )
+        self.assertIn("상위 페이지를 기본값으로 저장했습니다".encode(), resp.data)
+
+    def test_save_defaults_without_parent_url_shows_error(self):
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=True):
+            resp = self.client.post(
+                "/agenda",
+                data={"titles": "", "action": "save_defaults", "mirror_parent_url": "https://wiki.example.com/pages/900"},
+            )
+
+        self.assertIn("상위 페이지 URL을 입력해주세요".encode(), resp.data)
+
+    def test_save_defaults_without_mirror_parent_url_shows_error(self):
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=True):
+            resp = self.client.post(
+                "/agenda",
+                data={"titles": "", "action": "save_defaults", "parent_url": "https://wiki.example.com/pages/100"},
+            )
+
+        self.assertIn("미러링할 페이지의 상위 페이지 URL을 입력해주세요".encode(), resp.data)
 
     def test_agenda_page_prefills_parent_urls_from_last_successful_publish(self):
         # 상위 페이지는 거의 고정이라, 지난번에 쓴 URL이 기본값으로 미리
@@ -683,7 +719,7 @@ class ConfluenceDocxAndPatTest(unittest.TestCase):
                 "/confluence-pat", data={"confluence_pat": "x"}, follow_redirects=False
             )
         self.assertEqual(resp.status_code, 302)
-        self.assertIn("docx_error=", resp.headers["Location"])
+        self.assertIn("profile_error=", resp.headers["Location"])
 
     def test_save_confluence_pat_requires_nonempty_value(self):
         user = {"user_id": "dh.kwon", "display_name": "권동혁"}
@@ -692,7 +728,7 @@ class ConfluenceDocxAndPatTest(unittest.TestCase):
                 "/confluence-pat", data={"confluence_pat": "   "}, follow_redirects=False
             )
         self.assertEqual(resp.status_code, 302)
-        self.assertIn("docx_error=", resp.headers["Location"])
+        self.assertIn("profile_error=", resp.headers["Location"])
 
     def test_save_confluence_pat_success_verifies_then_calls_set_pat(self):
         user = {"user_id": "dh.kwon", "display_name": "권동혁"}
@@ -706,7 +742,7 @@ class ConfluenceDocxAndPatTest(unittest.TestCase):
         fake_verify.assert_called_once_with("my-new-pat")
         fake_set.assert_called_once_with("dh.kwon", "my-new-pat")
         self.assertEqual(resp.status_code, 302)
-        self.assertIn("docx_message=", resp.headers["Location"])
+        self.assertIn("profile_message=", resp.headers["Location"])
         self.assertIn("권동혁", unquote(resp.headers["Location"]))
 
     def test_save_confluence_pat_verification_failure_does_not_save(self):
@@ -721,7 +757,7 @@ class ConfluenceDocxAndPatTest(unittest.TestCase):
 
         fake_set.assert_not_called()
         self.assertEqual(resp.status_code, 302)
-        self.assertIn("docx_error=", resp.headers["Location"])
+        self.assertIn("profile_error=", resp.headers["Location"])
 
     def test_save_confluence_pat_verification_failure_shows_diagnostic_detail(self):
         """화면 에러 메시지가 그냥 "PAT 확인 실패: ..." 한 줄이 아니라,
@@ -768,13 +804,13 @@ class ConfluenceDocxAndPatTest(unittest.TestCase):
                 "/confluence-pat", data={"confluence_pat": "my-new-pat"}, follow_redirects=False
             )
         self.assertEqual(resp.status_code, 302)
-        self.assertIn("docx_error=", resp.headers["Location"])
+        self.assertIn("profile_error=", resp.headers["Location"])
 
     def test_delete_confluence_pat_requires_login(self):
         with mock.patch.object(auth, "get_current_user", return_value=None):
             resp = self.client.post("/confluence-pat/delete", follow_redirects=False)
         self.assertEqual(resp.status_code, 302)
-        self.assertIn("docx_error=", resp.headers["Location"])
+        self.assertIn("profile_error=", resp.headers["Location"])
 
     def test_delete_confluence_pat_calls_delete_pat(self):
         user = {"user_id": "dh.kwon", "display_name": "권동혁"}
@@ -785,27 +821,17 @@ class ConfluenceDocxAndPatTest(unittest.TestCase):
 
         fake_delete.assert_called_once_with("dh.kwon")
         self.assertEqual(resp.status_code, 302)
-        self.assertIn("docx_message=", resp.headers["Location"])
+        self.assertIn("profile_message=", resp.headers["Location"])
 
-    def test_docx_page_shows_pat_registered_status_for_logged_in_user(self):
+    def test_docx_page_does_not_show_pat_card_anymore(self):
+        # PAT 등록 UI는 /profile로 옮겨졌으니 변환기 화면에는 더 이상 없어야 한다.
         user = {"user_id": "dh.kwon", "display_name": "권동혁"}
         with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=True), \
              mock.patch.object(auth, "get_current_user", return_value=user), \
-             mock.patch.object(confluence_credentials, "is_configured", return_value=True), \
-             mock.patch.object(confluence_credentials, "status", return_value=object()):
+             mock.patch.object(confluence_credentials, "is_configured", return_value=True):
             resp = self.client.get("/confluence-to-docx")
 
-        self.assertIn("등록되어 있습니다".encode(), resp.data)
-
-    def test_docx_page_shows_not_registered_message_when_no_pat_yet(self):
-        user = {"user_id": "dh.kwon", "display_name": "권동혁"}
-        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=True), \
-             mock.patch.object(auth, "get_current_user", return_value=user), \
-             mock.patch.object(confluence_credentials, "is_configured", return_value=True), \
-             mock.patch.object(confluence_credentials, "status", return_value=None):
-            resp = self.client.get("/confluence-to-docx")
-
-        self.assertIn("아직 등록되지 않았습니다".encode(), resp.data)
+        self.assertNotIn(b'name="confluence_pat"', resp.data)
 
     def test_docx_page_redirects_to_index_when_feature_not_available(self):
         with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=False):
@@ -880,6 +906,59 @@ class ConfluenceDocxAndPatTest(unittest.TestCase):
             resp = self.client.get("/agenda")
 
         self.assertNotIn(b'href="/agenda/edit"', resp.data)
+
+
+class ProfilePageTest(unittest.TestCase):
+    """/profile - PAT 등록 화면을 변환기 화면에서 분리해 옮긴 사용자 프로필 화면."""
+
+    def setUp(self):
+        app.testing = True
+        self.client = app.test_client()
+
+    def test_redirects_to_index_when_feature_not_available(self):
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=False):
+            resp = self.client.get("/profile", follow_redirects=False)
+
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp.headers["Location"], "/")
+
+    def test_shows_pat_registered_status_for_logged_in_user(self):
+        user = {"user_id": "dh.kwon", "display_name": "권동혁"}
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=True), \
+             mock.patch.object(auth, "get_current_user", return_value=user), \
+             mock.patch.object(confluence_credentials, "is_configured", return_value=True), \
+             mock.patch.object(confluence_credentials, "status", return_value=object()):
+            resp = self.client.get("/profile")
+
+        body = resp.data.decode("utf-8")
+        self.assertIn("등록되어 있습니다", body)
+        self.assertNotIn("권동혁'님의 권한으로 조회, 생성, 수정됩니다", body)
+
+    def test_shows_acting_as_user_message_when_no_pat_yet(self):
+        user = {"user_id": "dh.kwon", "display_name": "권동혁"}
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=True), \
+             mock.patch.object(auth, "get_current_user", return_value=user), \
+             mock.patch.object(confluence_credentials, "is_configured", return_value=True), \
+             mock.patch.object(confluence_credentials, "status", return_value=None):
+            resp = self.client.get("/profile")
+
+        self.assertIn("'권동혁'님의 권한으로 조회, 생성, 수정됩니다".encode(), resp.data)
+
+    def test_nav_user_info_links_to_profile_when_feature_available(self):
+        user = {"user_id": "dh.kwon", "display_name": "권동혁"}
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=True), \
+             mock.patch.object(auth, "get_current_user", return_value=user):
+            resp = self.client.get("/agenda")
+
+        self.assertIn(b'href="/profile"', resp.data)
+
+    def test_nav_user_info_hides_profile_link_when_feature_not_available(self):
+        user = {"user_id": "dh.kwon", "display_name": "권동혁"}
+        with mock.patch("confluence_agenda.web.app.docx_export_configured", return_value=False), \
+             mock.patch.object(auth, "get_current_user", return_value=user):
+            resp = self.client.get("/agenda")
+
+        self.assertNotIn(b'href="/profile"', resp.data)
 
 
 class AgendaEditPageTest(unittest.TestCase):

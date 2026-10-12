@@ -29,7 +29,7 @@ from ..builder import (
     build_agenda_email_html,
     build_agenda_page_body,
     build_email_subject,
-    parse_agenda_input,
+    parse_agenda_titles,
 )
 from ..mailer import MailConfigError, is_mail_configured, send_report_email
 from . import auth, confluence_credentials
@@ -269,7 +269,7 @@ HOME_PAGE_TEMPLATE = """
         <p class="subtitle">원하는 기능을 선택하세요.</p>
       </div>
       {% if current_user %}
-      <div class="user-info">{{ current_user.display_name }}님<a href="/logout">로그아웃</a></div>
+      <div class="user-info">{{ current_user.display_name }}님{% if docx_export_configured %}<a href="/profile">프로필</a>{% endif %}<a href="/logout">로그아웃</a></div>
       {% endif %}
     </div>
   </header>
@@ -318,13 +318,13 @@ PAGE_TEMPLATE = """
       <div>
         <h1>Confluence 안건 페이지 생성기</h1>
         <p class="subtitle">
-          안건 제목을 한 줄씩 입력하세요(대략 10개 내외 권장). 이미 써둔 본문이
-          있으면 제목 아래 줄에 이어서 적고, 다음 안건과는 빈 줄로 구분하세요
-          — 본문을 안 쓴 안건은 기존처럼 자리표시자로 채워집니다.
+          안건 제목을 한 줄에 하나씩 입력하세요(대략 10개 내외 권장). 각 안건의
+          상세 내용은 생성 후 Confluence에서 채우거나 "안건 수정" 화면에서
+          다루면 됩니다.
         </p>
       </div>
       {% if current_user %}
-      <div class="user-info">{{ current_user.display_name }}님<a href="/logout">로그아웃</a></div>
+      <div class="user-info">{{ current_user.display_name }}님{% if docx_export_configured %}<a href="/profile">프로필</a>{% endif %}<a href="/logout">로그아웃</a></div>
       {% endif %}
     </div>
   </header>
@@ -338,7 +338,7 @@ PAGE_TEMPLATE = """
       <h2>안건</h2>
       <div class="field">
         <textarea id="titles" name="titles"
-                  placeholder="예산안 승인&#10;부서별 예산안을 검토하고 승인합니다.&#10;&#10;채용 계획">{{ titles_text }}</textarea>
+                  placeholder="예산안 승인&#10;채용 계획&#10;분기 회고">{{ titles_text }}</textarea>
       </div>
     </div>
 
@@ -353,18 +353,24 @@ PAGE_TEMPLATE = """
       <div class="field">
         <label for="parent_url">상위 페이지 URL</label>
         <input type="text" id="parent_url" name="parent_url" value="{{ parent_url }}"
-               placeholder="https://wiki.사내주소/pages/viewpage.action?pageId=123456">
+               placeholder="https://wiki.사내주소/pages/viewpage.action?pageId=123456"
+               onkeydown="if(event.key==='Enter'){event.preventDefault();}">
       </div>
       <div class="field">
         <label for="page_title">새 안건 페이지 제목</label>
         <input type="text" id="page_title" name="page_title" value="{{ page_title }}"
-               placeholder="9.21(월) 스탭팀장 미팅 피플팀 안건">
+               placeholder="9.21(월) 스탭팀장 미팅 피플팀 안건"
+               onkeydown="if(event.key==='Enter'){event.preventDefault();}">
       </div>
       <div class="field">
         <label for="mirror_parent_url">미러링 페이지의 상위 페이지 URL</label>
         <input type="text" id="mirror_parent_url" name="mirror_parent_url" value="{{ mirror_parent_url }}"
-               placeholder="https://wiki.사내주소/pages/viewpage.action?pageId=654321">
+               placeholder="https://wiki.사내주소/pages/viewpage.action?pageId=654321"
+               onkeydown="if(event.key==='Enter'){event.preventDefault();}">
       </div>
+      <button class="secondary" type="submit" name="action" value="save_defaults">
+        상위 페이지를 기본값으로 저장
+      </button>
     </div>
     {% endif %}
 
@@ -391,11 +397,13 @@ PAGE_TEMPLATE = """
       <div class="field">
         <label for="extra_to">그 외 이메일 (콤마로 구분)</label>
         <input type="text" id="extra_to" name="extra_to" value="{{ extra_to }}"
-               placeholder="someone@example.com, other@example.com">
+               placeholder="someone@example.com, other@example.com"
+               onkeydown="if(event.key==='Enter'){event.preventDefault();}">
       </div>
       <div class="field">
         <label for="subject">메일 제목</label>
-        <input type="text" id="subject" name="subject" value="{{ subject }}">
+        <input type="text" id="subject" name="subject" value="{{ subject }}"
+               onkeydown="if(event.key==='Enter'){event.preventDefault();}">
       </div>
     </div>
     {% endif %}
@@ -500,7 +508,7 @@ AGENDA_EDIT_PAGE_TEMPLATE = """
         </p>
       </div>
       {% if current_user %}
-      <div class="user-info">{{ current_user.display_name }}님<a href="/logout">로그아웃</a></div>
+      <div class="user-info">{{ current_user.display_name }}님{% if docx_export_configured %}<a href="/profile">프로필</a>{% endif %}<a href="/logout">로그아웃</a></div>
       {% endif %}
     </div>
   </header>
@@ -644,36 +652,13 @@ CONFLUENCE_DOCX_PAGE_TEMPLATE = """
         </p>
       </div>
       {% if current_user %}
-      <div class="user-info">{{ current_user.display_name }}님<a href="/logout">로그아웃</a></div>
+      <div class="user-info">{{ current_user.display_name }}님{% if docx_export_configured %}<a href="/profile">프로필</a>{% endif %}<a href="/logout">로그아웃</a></div>
       {% endif %}
     </div>
   </header>
 
   {% if docx_error %}<div class="message error">{{ docx_error }}</div>{% endif %}
   {% if docx_message %}<div class="message ok">{{ docx_message }}</div>{% endif %}
-
-  {% if confluence_pat_storage_available %}
-  <div class="card">
-    <h2>내 Confluence PAT</h2>
-    {% if confluence_pat_registered %}
-      <p class="subtitle" style="margin:0 0 10px;">등록되어 있습니다. 변환에는 이 토큰이 쓰입니다.</p>
-    {% else %}
-      <p class="subtitle" style="margin:0 0 10px;">
-        아직 등록되지 않았습니다 - 등록하지 않으면 관리자가 설정한 공용 토큰(있는 경우)으로 동작합니다.
-      </p>
-    {% endif %}
-    <form method="post" action="/confluence-pat" style="display:flex; gap:8px; margin-bottom:8px;">
-      <input type="text" name="confluence_pat" placeholder="새 PAT 입력"
-             autocomplete="off" style="flex:1;">
-      <button class="secondary" type="submit">{{ '업데이트' if confluence_pat_registered else '등록' }}</button>
-    </form>
-    {% if confluence_pat_registered %}
-    <form method="post" action="/confluence-pat/delete">
-      <button class="secondary" type="submit">내 PAT 삭제</button>
-    </form>
-    {% endif %}
-  </div>
-  {% endif %}
 
   <div class="card">
     <h2>변환</h2>
@@ -783,6 +768,63 @@ CONFLUENCE_DOCX_PAGE_TEMPLATE = """
     }
   })();
 </script>
+</body>
+</html>
+"""
+
+PROFILE_PAGE_TEMPLATE = """
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>내 프로필</title>
+<style>""" + _APP_STYLE + """</style>
+</head>
+<body>
+<div class="page">""" + _TOP_NAV_HTML + """
+  <header>
+    <div class="header-row">
+      <div>
+        <h1>내 프로필</h1>
+        <p class="subtitle">
+          Confluence 조회/생성/수정에 쓰이는 내 개인 액세스 토큰(PAT)을 관리합니다.
+        </p>
+      </div>
+      {% if current_user %}
+      <div class="user-info">{{ current_user.display_name }}님<a href="/logout">로그아웃</a></div>
+      {% endif %}
+    </div>
+  </header>
+
+  {% if profile_error %}<div class="message error">{{ profile_error }}</div>{% endif %}
+  {% if profile_message %}<div class="message ok">{{ profile_message }}</div>{% endif %}
+
+  {% if current_user and not confluence_pat_registered %}
+  <div class="message ok">
+    '{{ current_user.display_name }}'님의 권한으로 조회, 생성, 수정됩니다.
+  </div>
+  {% endif %}
+
+  {% if confluence_pat_storage_available %}
+  <div class="card">
+    <h2>내 Confluence PAT</h2>
+    {% if confluence_pat_registered %}
+      <p class="subtitle" style="margin:0 0 10px;">등록되어 있습니다. 조회/생성/수정에는 이 토큰이 쓰입니다.</p>
+    {% endif %}
+    <form method="post" action="/confluence-pat" style="display:flex; gap:8px; margin-bottom:8px;">
+      <input type="text" name="confluence_pat" placeholder="새 PAT 입력"
+             autocomplete="off" style="flex:1;">
+      <button class="secondary" type="submit">{{ '업데이트' if confluence_pat_registered else '등록' }}</button>
+    </form>
+    {% if confluence_pat_registered %}
+    <form method="post" action="/confluence-pat/delete">
+      <button class="secondary" type="submit">내 PAT 삭제</button>
+    </form>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
 </body>
 </html>
 """
@@ -912,71 +954,81 @@ def agenda_page():
         page_title = request.form.get("page_title", "").strip()
         action = request.form.get("action")
 
-        items = parse_agenda_input(titles_text)
-        if not items:
-            message, message_ok = "안건 제목을 한 줄에 하나씩 입력해주세요.", False
+        if action == "save_defaults":
+            # 상위 페이지 URL만 저장하는 액션이라 안건 제목이 비어 있어도 된다.
+            if not parent_url:
+                message, message_ok = "상위 페이지 URL을 입력해주세요.", False
+            elif not mirror_parent_url:
+                message, message_ok = "미러링할 페이지의 상위 페이지 URL을 입력해주세요.", False
+            else:
+                _save_last_publish_parents(parent_url, mirror_parent_url)
+                message, message_ok = "상위 페이지를 기본값으로 저장했습니다.", True
         else:
-            # publish_confluence는 API로 직접 만들어서, 손으로 붙여넣을 소스/버튼
-            # 안내가 필요 없다 - 오히려 "이미 만든 페이지를 또 손으로 만들라"는
-            # 것처럼 보여 혼란스럽다.
-            if action != "publish_confluence":
-                output = build_agenda_page_body(items)
-                diagram_html = build_macro_diagram_html(items)
+            items = parse_agenda_titles(titles_text)
+            if not items:
+                message, message_ok = "안건 제목을 한 줄에 하나씩 입력해주세요.", False
+            else:
+                # publish_confluence는 API로 직접 만들어서, 손으로 붙여넣을 소스/버튼
+                # 안내가 필요 없다 - 오히려 "이미 만든 페이지를 또 손으로 만들라"는
+                # 것처럼 보여 혼란스럽다.
+                if action != "publish_confluence":
+                    output = build_agenda_page_body(items)
+                    diagram_html = build_macro_diagram_html(items)
 
-            if action == "send_mail":
-                # dict.fromkeys로 순서를 유지한 채 중복 제거.
-                recipients = list(dict.fromkeys(selected_presets + _parse_extra_emails(extra_to)))
-                if not recipients:
-                    message, message_ok = "받는 사람을 한 명 이상 선택하거나 입력해주세요.", False
-                elif not is_mail_configured():
-                    message, message_ok = (
-                        "MAIL_API_TOKEN 등 메일 API 환경변수가 설정되지 않아 메일을 보낼 수 없습니다.",
-                        False,
-                    )
-                else:
-                    try:
-                        send_report_email(
-                            recipients,
-                            subject=subject,
-                            body_html=build_agenda_email_html(output),
-                        )
-                        names = ", ".join(display_name(addr) for addr in recipients)
-                        message, message_ok = f"메일을 보냈습니다: {names}", True
-                    except MailConfigError as e:
-                        message, message_ok = f"메일 발송 실패: {e}", False
-
-            elif action == "publish_confluence":
-                if not parent_url:
-                    message, message_ok = "상위 페이지 URL을 입력해주세요.", False
-                elif not page_title:
-                    message, message_ok = "새 안건 페이지 제목을 입력해주세요.", False
-                elif not mirror_parent_url:
-                    message, message_ok = "미러링할 페이지의 상위 페이지 URL을 입력해주세요.", False
-                else:
-                    current_user = auth.get_current_user()
-                    token = resolve_confluence_token(current_user["user_id"] if current_user else None)
-                    if not token:
+                if action == "send_mail":
+                    # dict.fromkeys로 순서를 유지한 채 중복 제거.
+                    recipients = list(dict.fromkeys(selected_presets + _parse_extra_emails(extra_to)))
+                    if not recipients:
+                        message, message_ok = "받는 사람을 한 명 이상 선택하거나 입력해주세요.", False
+                    elif not is_mail_configured():
                         message, message_ok = (
-                            "Confluence 개인 액세스 토큰(PAT)이 없습니다. "
-                            "워드 변환기 화면에서 내 PAT을 등록해주세요.",
+                            "MAIL_API_TOKEN 등 메일 API 환경변수가 설정되지 않아 메일을 보낼 수 없습니다.",
                             False,
                         )
                     else:
                         try:
-                            publish_result = create_agenda_page(
-                                parent_url,
-                                page_title,
-                                items,
-                                token=token,
-                                mirror_parent_url=mirror_parent_url,
+                            send_report_email(
+                                recipients,
+                                subject=subject,
+                                body_html=build_agenda_email_html(output),
                             )
-                            _save_last_publish_parents(parent_url, mirror_parent_url)
+                            names = ", ".join(display_name(addr) for addr in recipients)
+                            message, message_ok = f"메일을 보냈습니다: {names}", True
+                        except MailConfigError as e:
+                            message, message_ok = f"메일 발송 실패: {e}", False
+
+                elif action == "publish_confluence":
+                    if not parent_url:
+                        message, message_ok = "상위 페이지 URL을 입력해주세요.", False
+                    elif not page_title:
+                        message, message_ok = "새 안건 페이지 제목을 입력해주세요.", False
+                    elif not mirror_parent_url:
+                        message, message_ok = "미러링할 페이지의 상위 페이지 URL을 입력해주세요.", False
+                    else:
+                        current_user = auth.get_current_user()
+                        token = resolve_confluence_token(current_user["user_id"] if current_user else None)
+                        if not token:
                             message, message_ok = (
-                                f"'{publish_result['title']}' 안건 페이지를 만들었습니다.",
-                                True,
+                                "Confluence 개인 액세스 토큰(PAT)이 없습니다. "
+                                "워드 변환기 화면에서 내 PAT을 등록해주세요.",
+                                False,
                             )
-                        except Exception as e:
-                            message, message_ok = f"안건 페이지 생성 실패: {e}", False
+                        else:
+                            try:
+                                publish_result = create_agenda_page(
+                                    parent_url,
+                                    page_title,
+                                    items,
+                                    token=token,
+                                    mirror_parent_url=mirror_parent_url,
+                                )
+                                _save_last_publish_parents(parent_url, mirror_parent_url)
+                                message, message_ok = (
+                                    f"'{publish_result['title']}' 안건 페이지를 만들었습니다.",
+                                    True,
+                                )
+                            except Exception as e:
+                                message, message_ok = f"안건 페이지 생성 실패: {e}", False
 
     return render_template_string(
         PAGE_TEMPLATE,
@@ -1102,6 +1154,22 @@ def confluence_docx_page():
     if not docx_export_configured():
         return redirect("/")
 
+    return render_template_string(
+        CONFLUENCE_DOCX_PAGE_TEMPLATE,
+        current_user=auth.get_current_user(),
+        docx_error=request.args.get("docx_error"),
+        docx_message=request.args.get("docx_message"),
+        mail_configured=is_mail_configured(),
+        docx_export_configured=True,
+        active_nav="docx",
+    )
+
+
+@app.route("/profile", methods=["GET"])
+def profile_page():
+    if not docx_export_configured():
+        return redirect("/")
+
     current_user = auth.get_current_user()
     pat_storage_available = confluence_credentials.is_configured()
     pat_registered = bool(
@@ -1109,15 +1177,14 @@ def confluence_docx_page():
     )
 
     return render_template_string(
-        CONFLUENCE_DOCX_PAGE_TEMPLATE,
+        PROFILE_PAGE_TEMPLATE,
         current_user=current_user,
         confluence_pat_storage_available=pat_storage_available,
         confluence_pat_registered=pat_registered,
-        docx_error=request.args.get("docx_error"),
-        docx_message=request.args.get("docx_message"),
-        mail_configured=is_mail_configured(),
+        profile_error=request.args.get("profile_error"),
+        profile_message=request.args.get("profile_message"),
         docx_export_configured=True,
-        active_nav="docx",
+        active_nav=None,
     )
 
 
@@ -1271,16 +1338,16 @@ def confluence_to_docx_email(job_id):
 def save_confluence_pat():
     current_user = auth.get_current_user()
     if current_user is None:
-        return redirect(f"/confluence-to-docx?docx_error={quote('로그인이 필요합니다.')}")
+        return redirect(f"/profile?profile_error={quote('로그인이 필요합니다.')}")
 
     pat = request.form.get("confluence_pat", "").strip()
     if not pat:
-        return redirect(f"/confluence-to-docx?docx_error={quote('PAT을 입력해주세요.')}")
+        return redirect(f"/profile?profile_error={quote('PAT을 입력해주세요.')}")
 
     try:
         owner = verify_confluence_token(pat)
     except DocxExportUnavailable as e:
-        return redirect(f"/confluence-to-docx?docx_error={quote(str(e))}")
+        return redirect(f"/profile?profile_error={quote(str(e))}")
     except Exception:
         # PAT이 틀렸거나(401/익명 응답), 서버 연결 자체가 안 되는 경우 -
         # 등록자가 적은 이름을 그대로 믿지 않고, Confluence가 확인해주지
@@ -1291,15 +1358,15 @@ def save_confluence_pat():
         # - 터미널 접속 없이도 화면에서 바로 원인을 좁힐 수 있게.
         detail = "\n".join(diagnose_confluence_connection(pat))
         message = "PAT 확인 실패:\n" + detail
-        return redirect(f"/confluence-to-docx?docx_error={quote(message)}")
+        return redirect(f"/profile?profile_error={quote(message)}")
 
     try:
         confluence_credentials.set_pat(current_user["user_id"], pat)
     except confluence_credentials.CredentialStorageUnavailable as e:
-        return redirect(f"/confluence-to-docx?docx_error={quote(str(e))}")
+        return redirect(f"/profile?profile_error={quote(str(e))}")
 
     return redirect(
-        f"/confluence-to-docx?docx_message="
+        f"/profile?profile_message="
         f"{quote(f'내 Confluence PAT을 저장했습니다. (확인된 소유자: {owner})')}"
     )
 
@@ -1308,10 +1375,10 @@ def save_confluence_pat():
 def delete_confluence_pat():
     current_user = auth.get_current_user()
     if current_user is None:
-        return redirect(f"/confluence-to-docx?docx_error={quote('로그인이 필요합니다.')}")
+        return redirect(f"/profile?profile_error={quote('로그인이 필요합니다.')}")
 
     confluence_credentials.delete_pat(current_user["user_id"])
-    return redirect(f"/confluence-to-docx?docx_message={quote('내 Confluence PAT을 삭제했습니다.')}")
+    return redirect(f"/profile?profile_message={quote('내 Confluence PAT을 삭제했습니다.')}")
 
 
 LOGIN_PAGE_TEMPLATE = """
