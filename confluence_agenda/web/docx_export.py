@@ -126,6 +126,7 @@ from . import confluence_credentials
 try:
     from docx import Document as DocxDocument
     from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
     from docx.shared import Mm, Pt
     from docx.table import Table as DocxTable
@@ -134,6 +135,7 @@ try:
 except ImportError:  # python-docx/lxml 미설치 - 이 기능만 비활성화된다.
     DocxDocument = None
     WD_ALIGN_PARAGRAPH = None
+    OxmlElement = None
     qn = None
     Mm = None
     Pt = None
@@ -1802,6 +1804,42 @@ def _set_east_asian_font(font, name: str) -> None:
             del r_fonts.attrib[qn(f"w:{attr}")]
 
 
+# w:rPr 자식 요소의 스키마 순서(OOXML CT_RPr 시퀀스) - python-docx가 w:w(장평)/
+# w:spacing(자간)을 속성으로 노출하지 않아서 직접 끼워 넣어야 하는데, 순서가
+# 틀리면 워드가 "복구" 경고를 띄우며 해당 서식을 통째로 무시할 수 있다.
+_RPR_TAG_SEQ = (
+    "w:rStyle", "w:rFonts", "w:b", "w:bCs", "w:i", "w:iCs", "w:caps", "w:smallCaps",
+    "w:strike", "w:dstrike", "w:outline", "w:shadow", "w:emboss", "w:imprint",
+    "w:noProof", "w:snapToGrid", "w:vanish", "w:webHidden", "w:color", "w:spacing",
+    "w:w", "w:kern", "w:position", "w:sz", "w:szCs", "w:highlight", "w:u", "w:effect",
+    "w:bdr", "w:shd", "w:fitText", "w:vertAlign", "w:rtl", "w:cs", "w:em", "w:lang",
+    "w:eastAsianLayout", "w:specVanish", "w:oMath",
+)
+
+
+def _set_rpr_child(r_pr, tag: str, value: str, attr: str = "w:val") -> None:
+    existing = r_pr.find(qn(tag))
+    if existing is not None:
+        existing.set(qn(attr), value)
+        return
+    index = _RPR_TAG_SEQ.index(tag)
+    elm = OxmlElement(tag)
+    elm.set(qn(attr), value)
+    r_pr.insert_element_before(elm, *_RPR_TAG_SEQ[index + 1 :])
+
+
+def _set_character_scale(font, percent: int) -> None:
+    """장평(글자 좌우 폭 비율, %) - python-docx에 없는 속성이라 w:w를 직접 넣는다."""
+    r_pr = font._element.get_or_add_rPr()
+    _set_rpr_child(r_pr, "w:w", str(percent))
+
+
+def _set_character_spacing(font, twips: int) -> None:
+    """자간/문자간격(1/20pt 단위, 양수=넓게/음수=좁게) - w:spacing을 직접 넣는다."""
+    r_pr = font._element.get_or_add_rPr()
+    _set_rpr_child(r_pr, "w:spacing", str(twips))
+
+
 def _shade_cell(cell, hex_color: str) -> None:
     shading = etree.SubElement(cell._tc.get_or_add_tcPr(), qn("w:shd"))
     shading.set(qn("w:val"), "clear")
@@ -1836,6 +1874,7 @@ def _configure_document_styles(document: DocxDocument) -> None:
     normal = document.styles["Normal"]
     _set_east_asian_font(normal.font, _DOCUMENT_FONT_NAME)
     normal.font.size = Pt(12)
+    _set_character_scale(normal.font, 95)  # 본문 장평 95%
     normal.paragraph_format.space_before = Pt(0)
     normal.paragraph_format.space_after = Pt(0)
 
@@ -1844,6 +1883,8 @@ def _configure_document_styles(document: DocxDocument) -> None:
     title_style.font.size = Pt(18)
     title_style.font.bold = True
     title_style.font.underline = True
+    _set_character_scale(title_style.font, 95)  # 제목 장평 95%
+    _set_character_spacing(title_style.font, 5)  # 제목 문자간격 0.25pt 넓게(=5 twips)
     title_style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
     # python-docx 기본 템플릿의 "Title" 스타일은 밑줄과는 별개로 문단 아래에
     # 가로줄(테두리, w:pBdr)이 하나 더 있어서, 우리가 지정한 글자 밑줄과
@@ -1862,6 +1903,7 @@ def _configure_document_styles(document: DocxDocument) -> None:
         _set_east_asian_font(style.font, _DOCUMENT_FONT_NAME)
         style.font.size = Pt(_HEADING_FONT_SIZES_PT.get(level, _HEADING_FONT_SIZES_PT[3]))
         style.font.bold = True
+        _set_character_scale(style.font, 95)  # 본문과 같은 장평(제목 폴딩 안전망).
         style.paragraph_format.keep_with_next = True
 
 
@@ -2262,7 +2304,10 @@ def _render_table(document: DocxDocument, table_element: etree._Element, images:
         docx_cell = table.cell(row_index, col_index)
         if end_row != row_index or end_col != col_index:
             docx_cell = docx_cell.merge(table.cell(end_row, end_col))
-        is_header = _local(cell.tag) == "th"
+        # 표 첫 줄은 <th>로 마크업돼 있지 않아도(실제 Confluence 표 본문이
+        # 흔히 그렇다) 항상 헤더로 취급해 굵게+음영을 준다(사용자 요청: "표
+        # 첫줄은 bold로 해주고 제일 옅은 회색음영으로 해줘").
+        is_header = row_index == 0 or _local(cell.tag) == "th"
         _render_cell_content(docx_cell, cell, images, bold=is_header)
         if is_header:
             _shade_cell(docx_cell, _TABLE_HEADER_SHADING_HEX)
@@ -2298,6 +2343,7 @@ def _render_cell_content(docx_cell, source_cell: etree._Element, images: dict, *
         for run in paragraph.runs:
             run.font.size = Pt(10)
             _set_east_asian_font(run.font, _DOCUMENT_FONT_NAME)
+            _set_character_scale(run.font, 80)  # 표 안 글자 장평 80%
 
 
 def _int_attr(element: etree._Element, name: str) -> int:

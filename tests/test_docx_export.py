@@ -1382,6 +1382,15 @@ class StructuralFoldTest(unittest.TestCase):
         for text in ("대분류", "중분류", "소분류"):
             self.assertIsNone(by_text[text].paragraph_format.left_indent)
 
+    def test_box_symbol_heading_category_is_bold(self):
+        # 본문 중 네모 문자("□")에 해당하는 제목 카테고리는 굵게 보여야
+        # 한다(사용자 요청) - h3가 "□" 단계(h2 기준)로 접혀 들어간다.
+        data = self._convert("<h3>□ 가나다라마바사</h3><p>- 세부 내용</p>")
+        document = DocxDocument(io.BytesIO(data))
+        by_text = {p.text: p for p in document.paragraphs}
+        heading_paragraph = by_text["□\t가나다라마바사"]
+        self.assertTrue(all(run.bold for run in heading_paragraph.runs))
+
     def test_heading_with_existing_marker_text_is_kept_verbatim_not_doubled(self):
         # 원문에 이미 "1." 같은 말머리가 타이핑돼 있으면 그대로 쓰고 새로
         # 붙이지 않는다(keep_leading_markers) - "1.\t1. 추진 배경"처럼 겹치면 안 된다.
@@ -1763,6 +1772,19 @@ class DocumentStyleConfigurationTest(unittest.TestCase):
         self.assertTrue(title.font.bold)
         self.assertTrue(title.font.underline)
 
+    def test_title_style_character_scale_and_spacing(self):
+        # 제목: 장평 95%, 문자간격 0.25pt 넓게(=5 twips) (사용자 요청).
+        document = self._convert_document()
+        r_pr = document.styles["Title"].element.find(qn("w:rPr"))
+        self.assertEqual(r_pr.find(qn("w:w")).get(qn("w:val")), "95")
+        self.assertEqual(r_pr.find(qn("w:spacing")).get(qn("w:val")), "5")
+
+    def test_normal_style_character_scale_is_95(self):
+        # 본문: 장평 95%(사용자 요청).
+        document = self._convert_document()
+        r_pr = document.styles["Normal"].element.find(qn("w:rPr"))
+        self.assertEqual(r_pr.find(qn("w:w")).get(qn("w:val")), "95")
+
     def test_title_style_has_no_bottom_border_and_no_theme_font_override(self):
         # python-docx 기본 템플릿의 Title 스타일은 (1) 문단 밑에 가로줄
         # 테두리가 있어서 우리가 지정한 글자 밑줄과 겹쳐 "긴 밑줄"처럼
@@ -1827,6 +1849,8 @@ class DocumentStyleConfigurationTest(unittest.TestCase):
         header_run = table.cell(0, 0).paragraphs[0].runs[0]
         self.assertEqual(header_run.font.size, Pt(10))
         self.assertTrue(header_run.bold)
+        header_r_pr = header_run.font._element.get_or_add_rPr()
+        self.assertEqual(header_r_pr.find(qn("w:w")).get(qn("w:val")), "80")
         shading = table.cell(0, 0)._tc.get_or_add_tcPr().find(qn("w:shd"))
         self.assertIsNotNone(shading)
         self.assertEqual(shading.get(qn("w:fill")), "F2F2F2")
@@ -1834,6 +1858,31 @@ class DocumentStyleConfigurationTest(unittest.TestCase):
         data_run = table.cell(1, 0).paragraphs[0].runs[0]
         self.assertEqual(data_run.font.size, Pt(10))
         self.assertFalse(data_run.bold)
+        data_r_pr = data_run.font._element.get_or_add_rPr()
+        self.assertEqual(data_r_pr.find(qn("w:w")).get(qn("w:val")), "80")
+
+    def test_table_first_row_is_bold_and_shaded_even_without_th_tag(self):
+        # 실제 Confluence 표는 첫 줄도 그냥 <td>로만 돼 있는 경우가 흔하다 -
+        # <th> 여부와 무관하게 표 첫 줄은 항상 굵게+음영이어야 한다(사용자 요청).
+        storage = (
+            "<table><tbody>"
+            "<tr><td>헤더1</td><td>헤더2</td></tr>"
+            "<tr><td>값1</td><td>값2</td></tr>"
+            "</tbody></table>"
+        )
+        resp = _page_response(storage, title="회의록")
+        with mock.patch("requests.get", return_value=resp):
+            data, _ = convert_confluence_url_to_docx("https://wiki.example.com/pages/123", token="t")
+        document = DocxDocument(io.BytesIO(data))
+        table = document.tables[0]
+
+        self.assertTrue(table.cell(0, 0).paragraphs[0].runs[0].bold)
+        shading = table.cell(0, 0)._tc.get_or_add_tcPr().find(qn("w:shd"))
+        self.assertIsNotNone(shading)
+        self.assertEqual(shading.get(qn("w:fill")), "F2F2F2")
+
+        self.assertFalse(table.cell(1, 0).paragraphs[0].runs[0].bold)
+        self.assertIsNone(table.cell(1, 0)._tc.get_or_add_tcPr().find(qn("w:shd")))
 
     def test_table_column_widths_are_proportional_to_content_not_equal(self):
         # 전에는 python-docx 기본값대로 모든 열이 똑같은 폭이었다 - 열마다
